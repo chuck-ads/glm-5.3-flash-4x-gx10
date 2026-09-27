@@ -20,6 +20,12 @@ c[0] * ... * c[i]. The next k maximises the batch's expected tokens over the
 step's cost, taken from VLLM_ADAPTIVE_K_COST_MS ("tokens:ms,..." by verified
 tokens per step), and changes only for a gain of at least VLLM_ADAPTIVE_K_MARGIN.
 
+With VLLM_ADAPTIVE_K_PER_REQUEST=1, a batch of several requests gets a k per
+request instead: every (request, draft) slot is scored by its survival
+probability and the best slots are admitted up to the budget that maximises
+expected tokens over step cost. Unequal k takes the batch off the full CUDA
+graph for attention (piecewise instead).
+
 If the file named by VLLM_ADAPTIVE_K_CONTROL holds "force N", every step
 verifies N drafts, which is how the cost table is measured.
 """
@@ -39,6 +45,7 @@ logger = init_logger(__name__)
 _ALPHA = float(os.environ.get("VLLM_ADAPTIVE_K_ALPHA", "0.25"))
 _MARGIN = float(os.environ.get("VLLM_ADAPTIVE_K_MARGIN", "0.03"))
 _PRIOR = 0.8
+_PER_REQUEST = os.environ.get("VLLM_ADAPTIVE_K_PER_REQUEST") == "1"
 
 
 def _parse_costs(spec: str) -> tuple[np.ndarray, np.ndarray]:
@@ -114,10 +121,45 @@ class AdaptiveKScheduler(AsyncScheduler):
         current = self._k if self._k in score else best
         return best if score[best] > score[current] * (1 + _MARGIN) else current
 
+    def _choose_per_request(self, req_ids: list[str]) -> dict[str, int]:
+        """A k for each request from one draft budget: every (request, draft)
+        slot is scored by its survival probability, and the budget is the
+        number of best slots that maximises expected tokens over step cost."""
+        decoding = [r for r in req_ids if r in self._rates]
+        if not decoding:
+            return {}
+        survival = np.cumprod(np.stack([self._rates[r] for r in decoding]), axis=1)
+        order = np.argsort(-survival, axis=None, kind="stable")
+        best_b, best_score, n = 0, len(decoding) / self._step_cost(len(decoding)), len(decoding)
+        gained = 0.0
+        for b, flat in enumerate(order, 1):
+            gained += survival.flat[flat]
+            score = (n + gained) / self._step_cost(n + b)
+            if score > best_score:
+                best_b, best_score = b, score
+        counts = np.bincount(order[:best_b] // survival.shape[1], minlength=n)
+        return {r: max(int(c), 1) for r, c in zip(decoding, counts)}
+
     def _update_after_schedule(self, scheduler_output: SchedulerOutput) -> None:
+        for req_id in [r for r in self._rates if r not in self.requests]:
+            del self._rates[req_id]
+        self._read_control()
+        if self.num_spec_tokens and _PER_REQUEST and self._force is None:
+            per = self._choose_per_request(list(scheduler_output.num_scheduled_tokens))
+            if len(per) > 1:
+                scheduler_output.num_spec_tokens_to_schedule = max(per.values())
+                super()._update_after_schedule(scheduler_output)
+                for req_id, k in per.items():
+                    request = self.requests.get(req_id)
+                    if request is not None and request.spec_token_ids:
+                        request.spec_token_ids = [-1] * k
+                for k in per.values():
+                    self._steps[k] += 1
+                return
+        self._update_batch_k(scheduler_output)
+
+    def _update_batch_k(self, scheduler_output: SchedulerOutput) -> None:
         if self.num_spec_tokens:
-            for req_id in [r for r in self._rates if r not in self.requests]:
-                del self._rates[req_id]
             k = self._choose(list(scheduler_output.num_scheduled_tokens))
             self._steps[k] += 1
             now = time.monotonic()
