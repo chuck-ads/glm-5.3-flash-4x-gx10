@@ -29,7 +29,7 @@ Cold prefill, tok/s (random-word prompts, nothing cached):
 | | 32k | 128k |
 |---|---|---|
 | v8 | 2,730 | 2,679 |
-| all overrides | 4,038 | 3,893 |
+| all overrides | 4,307 | 4,208 |
 
 Boot goes from about 8 minutes to about 3.5 once snapshots exist.
 
@@ -62,7 +62,12 @@ Boot goes from about 8 minutes to about 3.5 once snapshots exist.
 - **megamoe** (`megamoe/`): an NVFP4 MoE kernel for batches of up to 8 tokens.
   It reads the CUTLASS backend's own tensors, so CUTLASS still handles
   prefill. Activations stay 16-bit, which is exact in the weights, where
-  CUTLASS rounds them to FP4.
+  CUTLASS rounds them to FP4. With `VLLM_MOE_PREFILL=1` (the default here),
+  batches of 1024+ tokens take `megamoe/moe_prefill.cu`: the same W4A4 math as
+  CUTLASS on the same tensors, with the token gather, SwiGLU and FP4
+  requantization folded into the fc1 GEMM (hand-written block-scaled
+  `mma.sync` NVFP4). About 18 ms per layer at 16k tokens against CUTLASS's
+  22-26, equally close to an fp32 reference. +7-8% prefill.
 - **adaptive-k** (`adaptive-k/adaptive_k.py`): a scheduler that picks how many
   of the 7 DFlash2 drafts each step verifies (2, 3, 4, 5 or 7). It uses recent
   per-position acceptance and a measured cost per level
