@@ -12,6 +12,13 @@ GEMM is CUTLASS's scaled_mm, which reaches ~90% of the FP8 read roofline from
 M = 1 upwards. The router gate stays bf16 (routing is sensitive), and so do
 layers whose weight other code reads directly (kv_b_proj, the indexer's
 wk_weights_proj). The lm_head converts too unless VLLM_DENSE_FP8_LM_HEAD=0.
+
+Layers whose names match VLLM_DENSE_W4 go to NVFP4 instead (W4A16 through
+megadense4.cu, at the 4-bit roofline for up to 32 tokens; larger batches use
+an FP8 copy kept alongside). Half the bytes again, at a quality cost that
+depends on the layer: the KDA in_proj alone cost about as much NLL as FP8 on
+everything, all dense layers about 2-3x that. The DFlash drafter's layers
+only change acceptance, never the output.
 """
 
 import os
@@ -67,6 +74,73 @@ class Fp8LMHeadMethod:
         return getattr(self.inner, name)
 
 
+_W4_GRID = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
+_w4_ext = None
+
+
+def _w4():
+    global _w4_ext
+    if _w4_ext is None:
+        from torch.utils.cpp_extension import load
+
+        _w4_ext = load("megadense4", [os.environ.get("VLLM_MEGADENSE4_SRC", "/opt/megamoe/megadense4.cu")],
+                       extra_cuda_cflags=["-O3", "-gencode=arch=compute_121a,code=sm_121a"])
+    return _w4_ext
+
+
+class W4DenseLinearMethod(LinearMethodBase):
+    """A layer converted to NVFP4 in megadense4.cu's tiled layout."""
+
+
+    def create_weights(self, *args, **kwargs):
+        raise NotImplementedError("layers are converted after loading")
+
+    def apply(self, layer, x, bias=None):
+        shape = x.shape
+        x2 = x.reshape(-1, shape[-1])
+        N, K = layer.w4_shape
+        if x2.shape[0] == 0:
+            return x.new_empty(*shape[:-1], N)
+        M = x2.shape[0]
+        if M > 32 or x2.dtype != torch.bfloat16:  # past 32 tokens the FP8 copy is faster
+            return _fp8_linear(x, layer.weight_fp8, layer.weight_fp8_scale, bias)
+        y = torch.empty(M, N, dtype=torch.bfloat16, device=x.device)
+        _w4_ext.gemm(x2.contiguous(), layer.weight, layer.weight_scale, layer.weight_scale_2, y, 0)
+        if bias is not None:
+            y += bias
+        return y.reshape(*shape[:-1], N)
+
+
+def _quantize_w4(module: torch.nn.Module) -> int:
+    """NVFP4 with round to nearest: e4m3 scale per 16 k, one fp32 scale per
+    tensor, packed into megadense4.cu's tiled layout. Also keeps an FP8 copy
+    for batches of more than 32 tokens, where megadense4 loses to CUTLASS."""
+    w = module.weight.data
+    N, K = w.shape
+    wq8, ws8 = ops.scaled_fp8_quant(w.contiguous(), use_per_token_if_dynamic=True)
+    module.weight_fp8 = Parameter(wq8, requires_grad=False)
+    module.weight_fp8_scale = Parameter(ws8.view(1, -1).to(torch.float32).contiguous(), requires_grad=False)
+    wf = w.float().view(N, K // 16, 16)
+    gscale = (wf.abs().amax().clamp(min=1e-12) / (6.0 * 448.0)).item()
+    bs = (wf.abs().amax(-1, keepdim=True) / 6.0 / gscale).to(torch.float8_e4m3fn).float()
+    bs = torch.where(bs == 0, torch.ones_like(bs), bs)
+    v = wf / (bs * gscale)
+    grid = torch.tensor(_W4_GRID, device=w.device)
+    idx = torch.bucketize(v.abs().clamp(max=6.0), (grid[1:] + grid[:-1]) / 2)
+    codes = (idx + 8 * (v < 0)).to(torch.uint8).view(N, K)
+    packed = codes[:, 0::2] | (codes[:, 1::2] << 4)
+    wt = packed.view(N // 16, 2, 8, K // 128, 4, 16).permute(0, 3, 1, 2, 4, 5).contiguous().view(N, K // 2)
+    st = (bs.to(torch.float8_e4m3fn).view(torch.uint8).view(N, K // 16).view(N // 16, 2, 8, K // 128, 4, 2)
+          .permute(0, 3, 2, 4, 1, 5).contiguous().view(-1).view(torch.int32))
+    module.weight = Parameter(wt, requires_grad=False)
+    module.weight_scale = Parameter(st, requires_grad=False)
+    # A tensor, so weight snapshots save and restore it with the weights.
+    module.weight_scale_2 = Parameter(torch.tensor([gscale], dtype=torch.float32, device=w.device),
+                                      requires_grad=False)
+    module.w4_shape = (N, K)
+    return w.numel() * w.element_size() - wt.numel() - st.numel() * 4  # bytes a decode step no longer reads
+
+
 def _quantize(module: torch.nn.Module) -> int:
     w = module.weight.data
     wq, ws = ops.scaled_fp8_quant(w.contiguous(), use_per_token_if_dynamic=True)
@@ -81,7 +155,8 @@ def convert(model: torch.nn.Module) -> None:
     if os.environ.get("VLLM_DENSE_FP8") != "1":
         return
     lm_head = os.environ.get("VLLM_DENSE_FP8_LM_HEAD", "1") == "1"
-    saved, count = 0, 0
+    w4 = re.compile(os.environ["VLLM_DENSE_W4"]) if os.environ.get("VLLM_DENSE_W4") else None
+    saved, count, count4 = 0, 0, 0
     for name, m in model.named_modules():
         w = getattr(m, "weight", None)
         if not isinstance(w, torch.Tensor) or w.dtype != torch.bfloat16 or w.dim() != 2:
@@ -89,7 +164,13 @@ def convert(model: torch.nn.Module) -> None:
         if w.shape[0] % 16 or w.shape[1] % 16 or _EXCLUDE.search(name):
             continue
         method = getattr(m, "quant_method", None)
-        if isinstance(m, LinearBase) and isinstance(method, UnquantizedLinearMethod):
+        if (w4 is not None and w4.search(name) and isinstance(m, LinearBase)
+                and isinstance(method, UnquantizedLinearMethod) and w.shape[1] % 128 == 0):
+            _w4()
+            saved += _quantize_w4(m)
+            m.quant_method = W4DenseLinearMethod()
+            count4 += 1
+        elif isinstance(m, LinearBase) and isinstance(method, UnquantizedLinearMethod):
             saved += _quantize(m)
             m.quant_method = Fp8DenseLinearMethod()
             count += 1
@@ -98,7 +179,8 @@ def convert(model: torch.nn.Module) -> None:
             m.quant_method = Fp8LMHeadMethod(m.quant_method)
             count += 1
     torch.cuda.empty_cache()
-    logger.info("Dense FP8: converted %d linears, %.2f GiB less to read per step", count, saved / 2**30)
+    logger.info("Dense FP8: converted %d linears to FP8 and %d to NVFP4, %.2f GiB less to read per step",
+                count, count4, saved / 2**30)
 
 
 _FP4_GRID = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
@@ -125,10 +207,13 @@ def simulate_nvfp4(model: torch.nn.Module) -> None:
     NVFP4 in place, to measure what 4-bit dense weights would cost in quality."""
     if os.environ.get("VLLM_DENSE_NVFP4_SIM") != "1":
         return
+    only = re.compile(os.environ.get("VLLM_DENSE_NVFP4_SIM_MATCH", "."))
     count = 0
     for name, m in model.named_modules():
         w = getattr(m, "weight", None)
         method = getattr(m, "quant_method", None)
+        if not only.search(name):
+            continue
         if (isinstance(m, LinearBase) and isinstance(method, UnquantizedLinearMethod)
                 and isinstance(w, torch.Tensor) and w.dtype == torch.bfloat16 and w.dim() == 2
                 and w.shape[1] % 16 == 0 and not _EXCLUDE.search(name)):

@@ -18,7 +18,10 @@ Single stream, thinking off, 512 tokens (`dev/repro/decode.py` prompts):
 | | structured | code | prose |
 |---|---|---|---|
 | v8, DFlash2 k=7 | 121.9 | 91.3 | 38.7 |
-| all overrides | 152.9 | 109.9 | 58.3 |
+| all overrides | 163.7 | 118.9 | 61.8 |
+
+Concurrent streams, aggregate tok/s at 1/2/4/8 streams: v8 85.5/65.4/99.5/147.8,
+all overrides 127.1/94.0/137.5/186.2.
 
 Boot goes from about 8 minutes to about 3.5 once snapshots exist. Prefill is
 unchanged (about 2,650 tok/s at 32k and 128k).
@@ -39,7 +42,13 @@ unchanged (about 2,650 tok/s at 32k and 128k).
   per rank of dense linears in bf16, and decode reads them every step. This
   converts them to FP8 after load (per-channel weight scales, per-token
   activation scales, CUTLASS scaled_mm). +14-20% decode, and about +0.5% NLL
-  on prose.
+  on prose. Layers matching `VLLM_DENSE_W4` (by default the KDA in_proj and
+  every drafter layer) go to NVFP4 instead, through `megamoe/megadense4.cu`
+  (W4A16 at the 4-bit roofline, about twice as fast as the FP8 GEMM). They
+  keep an FP8 copy for batches of more than 32 tokens. That is +6-10% decode.
+  The in_proj costs about as much NLL again as FP8 did. The drafter layers only
+  change acceptance. NVFP4 on every dense layer cost 2-3x more NLL, so it is
+  not the default.
 - **megamoe** (`megamoe/`): an NVFP4 MoE kernel for batches of up to 8 tokens.
   It reads the CUTLASS backend's own tensors, so CUTLASS still handles
   prefill. Activations stay 16-bit, which is exact in the weights, where

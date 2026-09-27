@@ -1,10 +1,14 @@
-# FP8 weights for the dense linears the checkpoint left in bf16 (dense_fp8.py).
-# Needs snapshot.yaml's loader; keeps its own snapshots.
+# Dense linears the checkpoint left in bf16 (dense_fp8.py): FP8, except the
+# layers matching VLLM_DENSE_W4, which go to NVFP4 (megadense4.cu): by default
+# the KDA in_proj and every DFlash drafter layer. Needs snapshot.yaml's loader;
+# keeps its own snapshots.
 services:
   glm53:
     volumes:
       - ../experimental/snapshot/dense_fp8.py:/usr/local/lib/python3.12/dist-packages/vllm/model_executor/model_loader/dense_fp8.py:ro
+      - ../experimental/megamoe/megadense4.cu:/opt/megamoe/megadense4.cu:ro
     environment:
       - VLLM_DENSE_FP8=1
       - VLLM_DENSE_FP8_LM_HEAD=${VLLM_DENSE_FP8_LM_HEAD:-1}
-      - VLLM_WEIGHT_SNAPSHOT_TAG=spark-glm53:v8-fp8dense
+      - VLLM_DENSE_W4=${VLLM_DENSE_W4:-in_proj_qkvbfg_a$$|^model\.}
+      - VLLM_WEIGHT_SNAPSHOT_TAG=spark-glm53:v8-fp8w4b
