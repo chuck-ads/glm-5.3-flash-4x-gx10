@@ -7,6 +7,9 @@
 # (in_proj's FP8 GEMM quantizes the same rows the same way).
 # VLLM_GLM_ARX_PREFETCH: decode all-reduces prefetch the next weights into L2
 # while they wait (needs arx.yaml).
+# VLLM_GLM_SP_MOE_FUSED: MoE layers under SP compute shared + scaled routed
+# sum in one kernel that feeds arxbig's RDMA reduce-scatter row by row (needs
+# arx.yaml with VLLM_ARXBIG_RS=1 and megamoe.yaml with VLLM_MOE_PREFILL=1).
 services:
   glm53:
     volumes:
@@ -16,3 +19,5 @@ services:
       - VLLM_GLM_SP_MIN_TOKENS=${VLLM_GLM_SP_MIN_TOKENS:-1024}
       - VLLM_GLM_SP_FP8_GATHER=${VLLM_GLM_SP_FP8_GATHER:-1}
       - VLLM_GLM_ARX_PREFETCH=${VLLM_GLM_ARX_PREFETCH:-1}
+      - VLLM_GLM_SP_MOE_FUSED=${VLLM_GLM_SP_MOE_FUSED:-1}
+      - VLLM_GLM_SP_MOE_CHECK=${VLLM_GLM_SP_MOE_CHECK:-0}

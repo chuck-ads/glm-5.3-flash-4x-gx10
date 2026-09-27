@@ -115,6 +115,11 @@ class CudaCommunicator(DeviceCommunicatorBase):
             from vllm.distributed.device_communicators.arx import ArxCommunicator
 
             self.arx_comm = ArxCommunicator(self.cpu_group, self.device)
+        self.arxbig = None
+        if self.arx_comm is not None and os.environ.get("VLLM_ARXBIG") == "1":
+            from vllm.distributed.device_communicators.arx import ArxBig
+
+            self.arxbig = ArxBig(self.cpu_group, self.device)
 
         self.ca_comm: CustomAllreduce | None = None
         self.qr_comm: QuickAllReduce | None = None
@@ -356,6 +361,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
         return arx_comm.all_reduce(input_)[self.rank_in_group * chunk:(self.rank_in_group + 1) * chunk]
 
     def custom_all_gather(self, input_):
+        big = self.arxbig
+        if big is not None and not big.disabled and big.should_gather(input_):
+            return big.all_gather(input_)
         # Each rank's rows in their own slot of a zero tensor: the sum is the
         # concatenation, exactly (x + 0 is x).
         arx_comm = self.arx_comm

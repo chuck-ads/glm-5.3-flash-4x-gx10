@@ -101,7 +101,21 @@ _SP_FP8_GATHER = os.environ.get("VLLM_GLM_SP_FP8_GATHER") == "1"
 # (the MoE's gate and shared expert after attention, the next KDA in_proj
 # after the MLP) while it waits for the peers.
 _ARX_PREFETCH = os.environ.get("VLLM_GLM_ARX_PREFETCH") == "1"
+# SP prefill MoE layers: router, shared expert and moe_prefill's fc1/fc2 run
+# here, and one arxbig kernel writes shared + scaled routed sum straight into
+# the RDMA reduce-scatter while the network already sends finished rows. The
+# runner's separate scale and add passes and the NCCL reduce-scatter go away.
+_SP_MOE_FUSED = os.environ.get("VLLM_GLM_SP_MOE_FUSED") == "1"
+_sp_moe_check = int(os.environ.get("VLLM_GLM_SP_MOE_CHECK", "0"))
 _sp_active = False
+
+
+def _arxbig_rs():
+    """arxbig's extension if it was set up with reduce-scatter buffers, else None."""
+    from vllm.distributed import get_tp_group
+
+    big = getattr(get_tp_group().device_communicator, "arxbig", None)
+    return big.ext if big is not None and not big.disabled and big.rs else None
 
 
 def _arx_prefetch(tensors) -> None:
@@ -580,9 +594,13 @@ class Glm5NextDecoderLayer(nn.Module):
             nxt = self.__dict__.get("_next_layer")
             _arx_prefetch(nxt._before_attn_weights() if nxt is not None else ())
         if _sp_active and not self.is_sequence_parallel:
-            x = sp_all_gather(x)[: positions.shape[0]]
-            x = self.mlp(x)
-            x = sp_reduce_scatter(x)
+            big = _arxbig_rs() if _SP_MOE_FUSED and self._mlp_is_moe else None
+            if big is not None:
+                x = self._sp_moe_fused(big, x, positions.shape[0])
+            else:
+                x = sp_all_gather(x)[: positions.shape[0]]
+                x = self.mlp(x)
+                x = sp_reduce_scatter(x)
         elif self._mlp_is_moe:
             x = self.mlp(x, already_sequence_parallel=self.is_sequence_parallel)
         else:
@@ -597,6 +615,36 @@ class Glm5NextDecoderLayer(nn.Module):
             return x, None, None, None
 
         return x, residual, post, comb
+
+    def _sp_moe_fused(self, big, shard: torch.Tensor, n: int) -> torch.Tensor:
+        """SP MoE layer: gather, route, experts, and a reduce-scatter fed row by row."""
+        global _sp_moe_check
+        from vllm.model_executor.layers.fused_moe import megamoe_vllm
+
+        x = sp_all_gather(shard)[:n]
+        moe = self.mlp
+        runner = moe.experts
+        logits = moe.gate(x)
+        logits = logits[0] if isinstance(logits, tuple) else logits
+        topk_weights, topk_ids = runner.router.select_experts(
+            hidden_states=x, router_logits=logits,
+            topk_indices_dtype=runner._quant_method.topk_indices_dtype)
+        shared = moe.shared_experts(x)
+        routed = self.__dict__.get("_moe_prefill_layer")
+        if routed is None:
+            routed = next(m for m in moe.modules() if hasattr(m, "_moe_prefill_experts"))
+            self.__dict__["_moe_prefill_layer"] = routed
+        y, pos = megamoe_vllm.prefill_routed(routed, x, topk_weights, topk_ids)
+        w = (topk_weights.float() * runner.routed_scaling_factor).contiguous()
+        n_pad = shard.shape[0] * get_tensor_model_parallel_world_size()
+        seq = big.moe_finalize_rs(y, pos, w, shared.contiguous(), n, n_pad)
+        out = big.rs_finish(seq, shard.shape[0], x.shape[1])
+        if _sp_moe_check > 0:
+            _sp_moe_check -= 1
+            ref = sp_reduce_scatter(self.mlp(x))
+            rel = ((out.float() - ref.float()).norm() / ref.float().norm()).item()
+            logger.warning("SP MoE fused check: %d tokens, rel diff vs runner %.5f", n, rel)
+        return out
 
     def _after_attn_weights(self) -> list:
         """Weights the MoE reads first: the router gate and the shared expert."""
@@ -620,8 +668,8 @@ class Glm5NextDecoderLayer(nn.Module):
         from vllm.model_executor.model_loader import dense_fp8
 
         xq, xs = ops.scaled_fp8_quant(x.contiguous(), use_per_token_if_dynamic=True)
-        xq = tensor_model_parallel_all_gather(xq.view(torch.uint8), 0)[:n].view(torch.float8_e4m3fn)
-        xs = tensor_model_parallel_all_gather(xs, 0)[:n]
+        xq = sp_all_gather(xq.view(torch.uint8))[:n].view(torch.float8_e4m3fn)
+        xs = sp_all_gather(xs)[:n]
         placeholder = x.new_empty(n, x.shape[1])
         dense_fp8.prequant(placeholder, xq, xs)
         return placeholder
@@ -835,7 +883,8 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
                     layer, hidden_states, residual, post, comb
                 )
                 if sp:
-                    aux = sp_all_gather(aux)[:full_num_tokens]
+                    # clone: the gather may return a buffer later gathers reuse
+                    aux = sp_all_gather(aux)[:full_num_tokens].clone()
                 aux_hidden_states.append(aux)
 
         if not get_pp_group().is_last_rank:

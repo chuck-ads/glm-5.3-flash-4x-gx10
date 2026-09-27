@@ -29,7 +29,7 @@ Cold prefill, tok/s (random-word prompts, nothing cached):
 | | 32k | 128k |
 |---|---|---|
 | v8 | 2,730 | 2,679 |
-| all overrides | 4,365 | 4,242 |
+| all overrides | 4,468 | 4,369 |
 
 Boot goes from about 8 minutes to about 3.5 once snapshots exist.
 
@@ -88,6 +88,20 @@ Boot goes from about 8 minutes to about 3.5 once snapshots exist.
   plain TP: applied to every batch, SP cost decode 10-15%. The KDA layers'
   attention inputs are gathered as per-token FP8, half the bytes, since
   in_proj's FP8 GEMM would quantize the same rows the same way (+2%).
+- **arxbig** (`arx/arxbig.cu`, `VLLM_ARXBIG`, `VLLM_ARXBIG_RS`): all-gather and
+  reduce-scatter over RoCE for prefill-sized SP collectives, from pinned
+  buffers the ConnectX writes directly. The all-gather is ~10% faster than
+  NCCL's (187 vs 165 Gb/s), which alone is worth <1% of prefill; the point is
+  the reduce-scatter. With `VLLM_GLM_SP_MOE_FUSED`, MoE layers under SP run the
+  router, the shared expert and moe_prefill's fc1/fc2 in model.py, and one
+  kernel writes shared + scaled routed sum (fp32, rounded once) straight into
+  the send buffer, publishing rows as it goes, so the network runs under the
+  finalize. It replaces the runner's scale and add passes and NCCL's
+  reduce-scatter: ~12.5 -> ~8.4 ms per MoE layer at 16k tokens, prefill +2.5-3%.
+  All ranks write to all peers at once and this fabric has no PFC, so
+  incast drops packets and go-back-N retransmits make individual calls vary
+  (4-9 ms); per-destination serialization was worse (two QPs cannot fill a
+  link).
 - **arx prefetch** (`VLLM_GLM_ARX_PREFETCH`): while a decode all-reduce waits
   for its peers, its threads ask L2 for the weights the next kernels read (the
   router gate and shared expert after attention, the next in_proj after the
