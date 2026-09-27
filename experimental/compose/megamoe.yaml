@@ -6,6 +6,6 @@ services:
       - ../experimental/megamoe/megamoe_rm.cu:/opt/megamoe/megamoe_rm.cu:ro
       - ../experimental/megamoe/megamoe_vllm.py:/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/fused_moe/megamoe_vllm.py:ro
     environment:
-      - VLLM_MEGAMOE=1
+      - VLLM_MEGAMOE=${VLLM_MEGAMOE:-1}
       - VLLM_MEGAMOE_MAX_TOKENS=${VLLM_MEGAMOE_MAX_TOKENS:-8}
       - VLLM_MEGAMOE_VARIANT=${VLLM_MEGAMOE_VARIANT:-20}

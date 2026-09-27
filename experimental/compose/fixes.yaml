@@ -1,6 +1,15 @@
-# Small decode-path fixes found by profiling (2026-09-27).
+# Fixes found by profiling (2026-09-27): FlashInfer's per-step rollback clone,
+# the indexer's fp32 head-gate GEMM, a switch for the fused mHC kernel's token
+# limit, and a Triton sparse MLA kernel in place of FlashInfer's FA2 path
+# (VLLM_TRITON_SPARSE_MLA=1, about 3.3x faster on GB10).
 services:
   glm53:
     volumes:
       - ../experimental/fixes/_fa_common.py:/usr/local/lib/python3.12/dist-packages/flashinfer/mla/_batch_mla/_backends/_fa_common.py:ro
       - ../experimental/fixes/attention.py:/usr/local/lib/python3.12/dist-packages/vllm/models/glm5next/common/attention.py:ro
+      - ../experimental/fixes/tilelang_kernels.py:/usr/local/lib/python3.12/dist-packages/vllm/model_executor/kernels/mhc/tilelang_kernels.py:ro
+      - ../experimental/fixes/flashinfer_mla_sparse_sm90.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/mla/flashinfer_mla_sparse_sm90.py:ro
+      - ../experimental/fixes/gb10_sparse_mla.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/mla/gb10_sparse_mla.py:ro
+    environment:
+      - VLLM_MHC_FUSED_MAX_TOKENS=${VLLM_MHC_FUSED_MAX_TOKENS:-32}
+      - VLLM_TRITON_SPARSE_MLA=${VLLM_TRITON_SPARSE_MLA:-1}
