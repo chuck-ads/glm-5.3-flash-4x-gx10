@@ -1,0 +1,12 @@
+# Sequence parallelism over TP for prefill (fixes/model.py): a forward with at
+# least VLLM_GLM_SP_MIN_TOKENS tokens runs mHC, norms and residuals on a quarter
+# of the tokens per rank, with a gather before and a reduce-scatter after
+# attention and the MLP. Decode batches stay plain TP: at that size the extra
+# collectives cost more than the replicated work they save.
+services:
+  glm53:
+    volumes:
+      - /home/admin/gb10-fixes/model.py:/usr/local/lib/python3.12/dist-packages/vllm/models/glm5next/common/model.py:ro
+    environment:
+      - VLLM_GLM_SP_TP=${VLLM_GLM_SP_TP:-1}
+      - VLLM_GLM_SP_MIN_TOKENS=${VLLM_GLM_SP_MIN_TOKENS:-1024}

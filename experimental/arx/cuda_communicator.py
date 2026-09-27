@@ -345,6 +345,29 @@ class CudaCommunicator(DeviceCommunicatorBase):
             scope="global",
         )
 
+    # GB10: sequence-parallel collectives for decode-sized tensors, as arx
+    # all-reduces (~13-27 us against ~80 for NCCL). Returning None hands the
+    # call to NCCL's own reduce-scatter / all-gather (prefill sizes).
+    def custom_reduce_scatter(self, input_):
+        arx_comm = self.arx_comm
+        if arx_comm is None or arx_comm.disabled or not arx_comm.should_use(input_):
+            return None
+        chunk = input_.shape[0] // self.world_size
+        return arx_comm.all_reduce(input_)[self.rank_in_group * chunk:(self.rank_in_group + 1) * chunk]
+
+    def custom_all_gather(self, input_):
+        # Each rank's rows in their own slot of a zero tensor: the sum is the
+        # concatenation, exactly (x + 0 is x).
+        arx_comm = self.arx_comm
+        if arx_comm is None or arx_comm.disabled or input_.dtype != torch.bfloat16:
+            return None
+        full = input_.new_zeros(input_.shape[0] * self.world_size, *input_.shape[1:])
+        if not arx_comm.should_use(full):
+            return None
+        chunk = input_.shape[0]
+        full[self.rank_in_group * chunk:(self.rank_in_group + 1) * chunk] = input_
+        return arx_comm.all_reduce(full)
+
     def all_reduce(self, input_):
         arx_comm = self.arx_comm
         if arx_comm is not None and not arx_comm.disabled and arx_comm.should_use(input_):

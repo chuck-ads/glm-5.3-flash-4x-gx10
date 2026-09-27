@@ -34,6 +34,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 
 logger = init_logger(__name__)
 
+_ROWS = 2048
+_L2_WEIGHT_BYTES = 16 << 20
 _EXCLUDE = re.compile(r"(^|\.)(gate|kv_b_proj|wk_weights_proj|index_kpool_compress_gate)$|(^|\.)visual\.")
 
 
@@ -44,7 +46,17 @@ def _fp8_linear(x: torch.Tensor, weight: torch.Tensor, scale: torch.Tensor,
     if x2.shape[0] == 0:
         return x.new_empty(*shape[:-1], weight.shape[0])
     xq, xs = ops.scaled_fp8_quant(x2.contiguous(), use_per_token_if_dynamic=True)
-    out = ops.cutlass_scaled_mm(xq, weight.t(), xs, scale, x.dtype, bias)
+    M = xq.shape[0]
+    if M <= _ROWS or weight.numel() <= _L2_WEIGHT_BYTES or weight.shape[0] % 16:
+        out = ops.cutlass_scaled_mm(xq, weight.t(), xs, scale, x.dtype, bias)
+        return out.reshape(*shape[:-1], weight.shape[0])
+    # CUTLASS rasterizes along N, so every row of tiles rereads the whole
+    # weight. Once it outgrows L2 that comes from DRAM: 16k x 6416 x 4096 runs
+    # at 68 TFLOPS in one call and 169 in 2048-row calls.
+    out = torch.empty(M, weight.shape[0], dtype=x.dtype, device=x.device)
+    for m0 in range(0, M, _ROWS):
+        torch.ops._C.cutlass_scaled_mm(out[m0:m0 + _ROWS], xq[m0:m0 + _ROWS], weight.t(),
+                                       xs[m0:m0 + _ROWS], scale, bias)
     return out.reshape(*shape[:-1], weight.shape[0])
 
 
