@@ -37,6 +37,16 @@ def _load():
     return _ext
 
 
+# (address, bytes) ranges for the next all-reduce to prefetch into L2 while it waits.
+_prefetch: tuple = ()
+
+
+def set_prefetch(tensors) -> None:
+    """The next arx all-reduce asks L2 for these tensors' bytes while it waits for peers."""
+    global _prefetch
+    _prefetch = tuple((t.data_ptr(), t.numel() * t.element_size()) for t in tensors if t is not None)
+
+
 class ArxCommunicator:
     def __init__(self, group: ProcessGroup, device: torch.device):
         global _taken
@@ -73,6 +83,8 @@ class ArxCommunicator:
         )
 
     def all_reduce(self, t: torch.Tensor) -> torch.Tensor:
+        global _prefetch
         out = torch.empty_like(t)
-        self.ext.allreduce(t, out)
+        pf, _prefetch = _prefetch, ()
+        self.ext.allreduce(t, out, [p for p, _ in pf], [b for _, b in pf])
         return out

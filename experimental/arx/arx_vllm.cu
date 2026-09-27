@@ -91,8 +91,16 @@ struct Dev {
   int rank, world;
 };
 
+// Weight ranges the next kernels read; the kernel asks L2 for them before it waits.
+constexpr int kMaxPrefetch = 4;
+struct Prefetch {
+  const uint8_t* ptr[kMaxPrefetch];
+  long long bytes[kMaxPrefetch];
+  int count;
+};
+
 // out = sum over ranks of in. in and out may alias.
-__global__ void arx_kernel(Dev d, const __nv_bfloat16* __restrict__ in, __nv_bfloat16* out, int n) {
+__global__ void arx_kernel(Dev d, const __nv_bfloat16* __restrict__ in, __nv_bfloat16* out, int n, Prefetch pf) {
   const uint64_t seq = *d.seq_dev + 1;
   const int par = seq & 1;
   __nv_bfloat16* mine = d.send + (size_t)par * (kMaxBytes / 2);
@@ -109,6 +117,17 @@ __global__ void arx_kernel(Dev d, const __nv_bfloat16* __restrict__ in, __nv_bfl
     d.ctl->bytes[par] = (uint64_t)n * 2;
     __threadfence_system();
     d.ctl->seq = seq;
+  }
+  // DRAM is idle while the peers' data is in flight: spread one bulk L2
+  // prefetch per thread over each range.
+  if (pf.count > 0) {
+    const long long nthr = (long long)gridDim.x * blockDim.x, t = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    for (int r = 0; r < pf.count; ++r) {
+      const long long chunk = ((pf.bytes[r] + nthr - 1) / nthr + 15) & ~15LL, off = t * chunk;
+      const long long len = min(chunk, pf.bytes[r] - off) & ~15LL;
+      if (len > 0)
+        asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;\n" ::"l"(pf.ptr[r] + off), "r"((unsigned)len));
+    }
   }
   // Block 0 polls the pinned flags the NIC writes; the others wait on a word in
   // device memory, so only a few threads touch lines the NIC is filling.
@@ -335,7 +354,7 @@ void arx_connect(std::vector<std::string> infos) {
   S.connected = true;
 }
 
-void arx_allreduce(torch::Tensor in, torch::Tensor out) {
+void arx_allreduce(torch::Tensor in, torch::Tensor out, std::vector<int64_t> pf_ptrs, std::vector<int64_t> pf_bytes) {
   TORCH_CHECK(S.connected, "arx is not connected");
   TORCH_CHECK(!g_proxy_err, "arx proxy failed");
   TORCH_CHECK(in.scalar_type() == at::kBFloat16 && out.scalar_type() == at::kBFloat16 && in.is_contiguous() &&
@@ -343,8 +362,14 @@ void arx_allreduce(torch::Tensor in, torch::Tensor out) {
   const int n = in.numel();
   TORCH_CHECK(n % 8 == 0 && (size_t)n * 2 <= kMaxBytes);
   const int threads = 256, blocks = std::max(1, std::min(8, n / (threads * 8)));
+  Prefetch pf{};
+  pf.count = (int)std::min<size_t>(pf_ptrs.size(), kMaxPrefetch);
+  for (int r = 0; r < pf.count; ++r) {
+    pf.ptr[r] = reinterpret_cast<const uint8_t*>(pf_ptrs[r]);
+    pf.bytes[r] = pf_bytes[r];
+  }
   arx_kernel<<<blocks, threads, 0, at::cuda::getCurrentCUDAStream()>>>(
-      S.dev, (const __nv_bfloat16*)in.data_ptr(), (__nv_bfloat16*)out.data_ptr(), n);
+      S.dev, (const __nv_bfloat16*)in.data_ptr(), (__nv_bfloat16*)out.data_ptr(), n, pf);
 }
 
 int64_t arx_max_bytes() { return kMaxBytes; }

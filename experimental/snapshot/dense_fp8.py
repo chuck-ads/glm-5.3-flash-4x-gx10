@@ -39,13 +39,27 @@ _L2_WEIGHT_BYTES = 16 << 20
 _EXCLUDE = re.compile(r"(^|\.)(gate|kv_b_proj|wk_weights_proj|index_kpool_compress_gate)$|(^|\.)visual\.")
 
 
+# Activations already quantized to per-token FP8 elsewhere (the SP gather),
+# keyed by the placeholder tensor handed to the layer in their place.
+_prequant: dict[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
+
+
+def prequant(placeholder: torch.Tensor, xq: torch.Tensor, xs: torch.Tensor) -> None:
+    """The next FP8 linear called on `placeholder` uses (xq, xs) as its input."""
+    _prequant[placeholder.data_ptr()] = (placeholder, xq, xs)
+
+
 def _fp8_linear(x: torch.Tensor, weight: torch.Tensor, scale: torch.Tensor,
                 bias: torch.Tensor | None) -> torch.Tensor:
     shape = x.shape
     x2 = x.reshape(-1, shape[-1])
     if x2.shape[0] == 0:
         return x.new_empty(*shape[:-1], weight.shape[0])
-    xq, xs = ops.scaled_fp8_quant(x2.contiguous(), use_per_token_if_dynamic=True)
+    pq = _prequant.pop(x.data_ptr(), None) if _prequant else None
+    if pq is not None and pq[0] is x:
+        xq, xs = pq[1], pq[2]
+    else:
+        xq, xs = ops.scaled_fp8_quant(x2.contiguous(), use_per_token_if_dynamic=True)
     M = xq.shape[0]
     if M <= _ROWS or weight.numel() <= _L2_WEIGHT_BYTES or weight.shape[0] % 16:
         out = ops.cutlass_scaled_mm(xq, weight.t(), xs, scale, x.dtype, bias)

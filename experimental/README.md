@@ -29,7 +29,7 @@ Cold prefill, tok/s (random-word prompts, nothing cached):
 | | 32k | 128k |
 |---|---|---|
 | v8 | 2,730 | 2,679 |
-| all overrides | 4,307 | 4,208 |
+| all overrides | 4,365 | 4,242 |
 
 Boot goes from about 8 minutes to about 3.5 once snapshots exist.
 
@@ -53,7 +53,7 @@ Boot goes from about 8 minutes to about 3.5 once snapshots exist.
   weight for every row of tiles, and past L2 that comes from DRAM, so one call
   on a 16k x 6416 x 4096 GEMM runs at 68 TFLOPS and the pieces at 169. +14-20% decode, and about +0.5% NLL
   on prose. Layers matching `VLLM_DENSE_W4` (by default the KDA in_proj and
-  every drafter layer) go to NVFP4 instead, through `megamoe/megadense4.cu`
+  every drafter layer, attention o_proj and the shared experts) go to NVFP4 instead, through `megamoe/megadense4.cu`
   (W4A16 at the 4-bit roofline, about twice as fast as the FP8 GEMM). They
   keep an FP8 copy for batches of more than 32 tokens. That is +6-10% decode.
   The in_proj costs about as much NLL again as FP8 did. The drafter layers only
@@ -85,7 +85,13 @@ Boot goes from about 8 minutes to about 3.5 once snapshots exist.
   at least 1024 tokens keeps the residual stream split across the TP ranks, so
   mHC and the norms run on a quarter of the tokens, with an all-gather before
   and a reduce-scatter after attention and the MLP. +17% prefill. Decode stays
-  plain TP: applied to every batch, SP cost decode 10-15%.
+  plain TP: applied to every batch, SP cost decode 10-15%. The KDA layers'
+  attention inputs are gathered as per-token FP8, half the bytes, since
+  in_proj's FP8 GEMM would quantize the same rows the same way (+2%).
+- **arx prefetch** (`VLLM_GLM_ARX_PREFETCH`): while a decode all-reduce waits
+  for its peers, its threads ask L2 for the weights the next kernels read (the
+  router gate and shared expert after attention, the next in_proj after the
+  MoE). About -0.6 ms per 32 ms step.
 
 `dense_fp8.simulate_nvfp4` is a diagnostic. It rounds the dense weights
 through NVFP4 to measure the quality cost: about +1% NLL on prose.

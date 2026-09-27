@@ -3,6 +3,10 @@
 # of the tokens per rank, with a gather before and a reduce-scatter after
 # attention and the MLP. Decode batches stay plain TP: at that size the extra
 # collectives cost more than the replicated work they save.
+# VLLM_GLM_SP_FP8_GATHER: KDA attention inputs are gathered as per-token FP8
+# (in_proj's FP8 GEMM quantizes the same rows the same way).
+# VLLM_GLM_ARX_PREFETCH: decode all-reduces prefetch the next weights into L2
+# while they wait (needs arx.yaml).
 services:
   glm53:
     volumes:
@@ -10,3 +14,5 @@ services:
     environment:
       - VLLM_GLM_SP_TP=${VLLM_GLM_SP_TP:-1}
       - VLLM_GLM_SP_MIN_TOKENS=${VLLM_GLM_SP_MIN_TOKENS:-1024}
+      - VLLM_GLM_SP_FP8_GATHER=${VLLM_GLM_SP_FP8_GATHER:-1}
+      - VLLM_GLM_ARX_PREFETCH=${VLLM_GLM_ARX_PREFETCH:-1}

@@ -94,7 +94,20 @@ from vllm.models.common.ops.sequence_parallel import (
 # the batch size; graphs are captured below VLLM_GLM_SP_MIN_TOKENS, plain TP.
 _SP_TP = os.environ.get("VLLM_GLM_SP_TP") == "1"
 _SP_MIN_TOKENS = int(os.environ.get("VLLM_GLM_SP_MIN_TOKENS", "1024"))
+# Gather KDA attention inputs as per-token FP8 (half the bytes). The only
+# consumer is in_proj's FP8 GEMM, which would quantize the same rows the same way.
+_SP_FP8_GATHER = os.environ.get("VLLM_GLM_SP_FP8_GATHER") == "1"
+# Decode: each arx all-reduce asks L2 for the weights the next kernels read
+# (the MoE's gate and shared expert after attention, the next KDA in_proj
+# after the MLP) while it waits for the peers.
+_ARX_PREFETCH = os.environ.get("VLLM_GLM_ARX_PREFETCH") == "1"
 _sp_active = False
+
+
+def _arx_prefetch(tensors) -> None:
+    from vllm.distributed.device_communicators import arx
+
+    arx.set_prefetch(tensors)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -378,6 +391,7 @@ class Glm5NextDecoderLayer(nn.Module):
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         # Cached for the hot forward path (isinstance per layer per step).
         self._mlp_is_moe = isinstance(self.mlp, Glm5NextMoE)
+        self._in_proj = getattr(self.self_attn, "in_proj_qkvbfg_a", None)
         # In SP, the attention output projection leaves a partial sum; the
         # decoder-layer reduce_scatter after attention completes it (DSv4 pattern).
         # MTP layers use the non-mHC path which has no sp_reduce_scatter, so
@@ -532,7 +546,12 @@ class Glm5NextDecoderLayer(nn.Module):
         # Attention needs the full token sequence; mHC above ran on the SP
         # shard. Gather for attention, scatter back afterward (DSv4 pattern).
         sp = self.is_sequence_parallel or _sp_active
-        if sp:
+        if _ARX_PREFETCH and not sp:
+            _arx_prefetch(self._after_attn_weights())
+        if (sp and _SP_FP8_GATHER and _sp_active and self._in_proj is not None
+                and type(self._in_proj.quant_method).__name__ in ("Fp8DenseLinearMethod", "W4DenseLinearMethod")):
+            x = self._fp8_gather(x, positions.shape[0])
+        elif sp:
             x = sp_all_gather(x)[: positions.shape[0]]
 
         x = self.self_attn(
@@ -557,6 +576,9 @@ class Glm5NextDecoderLayer(nn.Module):
         )
 
         # Fully Connected
+        if _ARX_PREFETCH and not sp:
+            nxt = self.__dict__.get("_next_layer")
+            _arx_prefetch(nxt._before_attn_weights() if nxt is not None else ())
         if _sp_active and not self.is_sequence_parallel:
             x = sp_all_gather(x)[: positions.shape[0]]
             x = self.mlp(x)
@@ -575,6 +597,34 @@ class Glm5NextDecoderLayer(nn.Module):
             return x, None, None, None
 
         return x, residual, post, comb
+
+    def _after_attn_weights(self) -> list:
+        """Weights the MoE reads first: the router gate and the shared expert."""
+        if not self._mlp_is_moe:
+            return []
+        shared = self.mlp.shared_experts
+        out = [self.mlp.gate.weight]
+        if shared is not None:
+            out += [shared.gate_up_proj.weight, shared.down_proj.weight]
+        return out
+
+    def _before_attn_weights(self) -> list:
+        """This layer's KDA in_proj (packed weight and block scales)."""
+        if self._in_proj is None:
+            return []
+        return [self._in_proj.weight, getattr(self._in_proj, "weight_scale", None)]
+
+    def _fp8_gather(self, x: torch.Tensor, n: int) -> torch.Tensor:
+        """All-gather the SP shard as per-token FP8 for in_proj; returns its placeholder."""
+        from vllm import _custom_ops as ops
+        from vllm.model_executor.model_loader import dense_fp8
+
+        xq, xs = ops.scaled_fp8_quant(x.contiguous(), use_per_token_if_dynamic=True)
+        xq = tensor_model_parallel_all_gather(xq.view(torch.uint8), 0)[:n].view(torch.float8_e4m3fn)
+        xs = tensor_model_parallel_all_gather(xs, 0)[:n]
+        placeholder = x.new_empty(n, x.shape[1])
+        dense_fp8.prequant(placeholder, xq, xs)
+        return placeholder
 
     def hc_pre(
         self,
@@ -701,6 +751,8 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
         # The active slice is fixed after construction; cache it so forward
         # doesn't rebuild the slice (a fresh list) every step.
         self._active_layers = self.layers[self.start_layer : self.end_layer]
+        for a, b in zip(self._active_layers, self._active_layers[1:]):
+            a.__dict__["_next_layer"] = b  # plain attribute: not a submodule
 
         if get_pp_group().is_last_rank:
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
