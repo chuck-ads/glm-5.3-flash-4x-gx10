@@ -1,0 +1,6 @@
+# Small decode-path fixes found by profiling (2026-09-27).
+services:
+  glm53:
+    volumes:
+      - ../experimental/fixes/_fa_common.py:/usr/local/lib/python3.12/dist-packages/flashinfer/mla/_batch_mla/_backends/_fa_common.py:ro
+      - ../experimental/fixes/attention.py:/usr/local/lib/python3.12/dist-packages/vllm/models/glm5next/common/attention.py:ro

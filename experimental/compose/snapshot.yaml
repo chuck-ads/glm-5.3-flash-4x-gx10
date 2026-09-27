@@ -1,0 +1,14 @@
+# EXPERIMENT: local weight snapshots (weight_snapshot.py). The first boot loads
+# the checkpoint and writes one snapshot per rank; later boots load from it.
+services:
+  glm53:
+    volumes:
+      - ../experimental/snapshot/weight_snapshot.py:/usr/local/lib/python3.12/dist-packages/vllm/model_executor/model_loader/weight_snapshot.py:ro
+      - ../experimental/snapshot/base_loader.py:/usr/local/lib/python3.12/dist-packages/vllm/model_executor/model_loader/base_loader.py:ro
+      # CUTLASS NVFP4 MoE under weights_already_processed: allow it, and skip the
+      # in-place scale fold the snapshot already holds.
+      - ../experimental/snapshot/modelopt.py:/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/quantization/modelopt.py:ro
+      - ../experimental/snapshot/flashinfer_cutlass_moe.py:/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/fused_moe/experts/flashinfer_cutlass_moe.py:ro
+    environment:
+      - VLLM_WEIGHT_SNAPSHOT_DIR=/root/.cache/weight-snapshots
+      - VLLM_WEIGHT_SNAPSHOT_TAG=spark-glm53:v8

@@ -1,0 +1,10 @@
+# FP8 weights for the dense linears the checkpoint left in bf16 (dense_fp8.py).
+# Needs snapshot.yaml's loader; keeps its own snapshots.
+services:
+  glm53:
+    volumes:
+      - ../experimental/snapshot/dense_fp8.py:/usr/local/lib/python3.12/dist-packages/vllm/model_executor/model_loader/dense_fp8.py:ro
+    environment:
+      - VLLM_DENSE_FP8=1
+      - VLLM_DENSE_FP8_LM_HEAD=${VLLM_DENSE_FP8_LM_HEAD:-1}
+      - VLLM_WEIGHT_SNAPSHOT_TAG=spark-glm53:v8-fp8dense

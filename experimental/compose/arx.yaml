@@ -1,0 +1,10 @@
+# EXPERIMENT: arx RDMA all-reduce for decode-sized TP all-reduces (see arx.py).
+#   docker compose -f compose/glm53.yaml -f compose/arx.yaml up -d
+services:
+  glm53:
+    volumes:
+      - ../experimental/arx/arx.py:/usr/local/lib/python3.12/dist-packages/vllm/distributed/device_communicators/arx.py:ro
+      - ../experimental/arx/arx_vllm.cu:/usr/local/lib/python3.12/dist-packages/vllm/distributed/device_communicators/arx_vllm.cu:ro
+      - ../experimental/arx/cuda_communicator.py:/usr/local/lib/python3.12/dist-packages/vllm/distributed/device_communicators/cuda_communicator.py:ro
+    environment:
+      - VLLM_ARX_ALLREDUCE=1
