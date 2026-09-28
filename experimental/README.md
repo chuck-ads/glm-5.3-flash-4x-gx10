@@ -31,7 +31,7 @@ Cold prefill, tok/s (random-word prompts, nothing cached):
 | | 32k | 128k |
 |---|---|---|
 | v8 | 2,730 | 2,679 |
-| all overrides | 4,521 | 4,385 |
+| all overrides | 4,728 | 4,560 |
 
 Boot goes from about 8 minutes to about 3.5 once snapshots exist.
 
@@ -100,6 +100,9 @@ Boot goes from about 8 minutes to about 3.5 once snapshots exist.
   the send buffer, publishing rows as it goes, so the network runs under the
   finalize. It replaces the runner's scale and add passes and NCCL's
   reduce-scatter: ~12.5 -> ~8.4 ms per MoE layer at 16k tokens, prefill +2.5-3%.
+  With `VLLM_MOE_PREFILL_Y8` (default) fc2 writes its per-expert rows as e4m3
+  with a scale per 128 columns, halving the 1.07 GB each layer writes and reads
+  back: prefill +5%, GSM8K/HumanEval/NLL/tool-call results unchanged.
   All ranks write to all peers at once and this fabric has no PFC, so
   incast drops packets and go-back-N retransmits make individual calls vary
   (4-9 ms); per-destination serialization was worse (two QPs cannot fill a
@@ -111,3 +114,17 @@ Boot goes from about 8 minutes to about 3.5 once snapshots exist.
 
 `dense_fp8.simulate_nvfp4` is a diagnostic. It rounds the dense weights
 through NVFP4 to measure the quality cost: about +1% NLL on prose.
+
+## Quality
+
+`quality/quality.py` (GSM8K first 250 and HumanEval, greedy, thinking off;
+HumanEval programs run by `quality/run_he.py` in a no-network container),
+against stock v8 on the same boxes:
+
+| | v8 | all overrides |
+|---|---|---|
+| GSM8K (250) | 97.2% | 97.2% |
+| HumanEval pass@1 | 156/164 | 156/164 |
+| count to 200, thinking off, 5 runs | 0 corrupt | 0 corrupt |
+| tool call at 42k context, 40 greedy runs | 10 diverge | 0 diverge |
+| NLL vs bf16, 4 texts | within ±0.006 | within ±0.006 |

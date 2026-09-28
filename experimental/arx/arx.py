@@ -133,8 +133,8 @@ class ArxBig:
 
     def should_gather(self, t: torch.Tensor) -> bool:
         total = t.numel() * t.element_size() * self.world
-        return (t.is_cuda and t.is_contiguous() and t.dim() >= 1 and (t.numel() * t.element_size()) % 16 == 0
+        return (t.is_cuda and t.dim() >= 1 and (t.numel() * t.element_size()) % 16 == 0
                 and self.min_bytes <= total <= self.slot)
 
     def all_gather(self, t: torch.Tensor) -> torch.Tensor:
-        return self.ext.all_gather(t)
+        return self.ext.all_gather(t.contiguous())

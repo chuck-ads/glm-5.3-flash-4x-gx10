@@ -634,10 +634,10 @@ class Glm5NextDecoderLayer(nn.Module):
         if routed is None:
             routed = next(m for m in moe.modules() if hasattr(m, "_moe_prefill_experts"))
             self.__dict__["_moe_prefill_layer"] = routed
-        y, pos = megamoe_vllm.prefill_routed(routed, x, topk_weights, topk_ids)
+        y, pos, y8s = megamoe_vllm.prefill_routed(routed, x, topk_weights, topk_ids, megamoe_vllm._PREFILL_Y8)
         w = (topk_weights.float() * runner.routed_scaling_factor).contiguous()
         n_pad = shard.shape[0] * get_tensor_model_parallel_world_size()
-        seq = big.moe_finalize_rs(y, pos, w, shared.contiguous(), n, n_pad)
+        seq = big.moe_finalize_rs(y, pos, w, shared.contiguous(), n, n_pad, y8s)
         out = big.rs_finish(seq, shard.shape[0], x.shape[1])
         if _sp_moe_check > 0:
             _sp_moe_check -= 1

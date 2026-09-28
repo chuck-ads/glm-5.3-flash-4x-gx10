@@ -32,6 +32,9 @@ _PREFILL_SRC = os.environ.get("VLLM_MOE_PREFILL_SRC", "/opt/megamoe/moe_prefill.
 _PREFILL = os.environ.get("VLLM_MOE_PREFILL") == "1"
 _PREFILL_MIN = int(os.environ.get("VLLM_MOE_PREFILL_MIN_TOKENS", "1024"))
 _check_left = int(os.environ.get("VLLM_MOE_PREFILL_CHECK", "0"))
+# fc2's per-expert rows as e4m3 with a scale per 128 columns: half the bytes
+# written and read back, for callers that pass the scales on (arxbig's finalize).
+_PREFILL_Y8 = os.environ.get("VLLM_MOE_PREFILL_Y8") == "1"
 _ext = None
 _pext = None
 _scratch: dict = {}
@@ -56,11 +59,12 @@ def _load_prefill():
     return _pext
 
 
-def prefill_routed(m, x, topk_weights, topk_ids):
+def prefill_routed(m, x, topk_weights, topk_ids, y8: bool = False):
     """moe_prefill.cu's fc1 and fc2 on the tensors CUTLASS would get.
 
-    Returns (y, pos): y [M * topk, H] bf16 holds each (token, k) expert
-    output in expert-sorted order, pos [M * topk] its row.
+    Returns (y, pos, y8s): y [M * topk, H] holds each (token, k) expert output
+    in expert-sorted order, pos [M * topk] its row. With y8, y is e4m3 bytes
+    and y8s [M * topk, H / 128] fp32 its scales; otherwise y is bf16, y8s None.
     """
     fe = m._moe_prefill_experts
     w13, w2 = m.w13_weight, m.w2_weight
@@ -87,16 +91,21 @@ def prefill_routed(m, x, topk_weights, topk_ids):
     rows = (order // topk).int()
     hq = torch.empty(R, I // 2, dtype=torch.uint8, device=x.device)
     hs = torch.empty(((R + 127) // 128) * 128 * (I // 16), dtype=torch.uint8, device=x.device)
-    y = torch.empty(R, H, dtype=torch.bfloat16, device=x.device)
     _pext.fc1(xq, xs.view(torch.uint8).flatten(), rows, off, tiles, w13, fe.w1_scale.view(torch.uint8),
               m._moe_prefill_g1, m._moe_prefill_a2, hq, hs, m._megamoe_limit)
+    if y8:
+        y = torch.empty(R, H, dtype=torch.uint8, device=x.device)
+        y8s = torch.empty(R, H // 128, dtype=torch.float32, device=x.device)
+        _pext.fc2(hq, hs, off, tiles, w2, fe.w2_scale.view(torch.uint8), m._moe_prefill_g2, y, y8s)
+        return y, pos, y8s
+    y = torch.empty(R, H, dtype=torch.bfloat16, device=x.device)
     _pext.fc2(hq, hs, off, tiles, w2, fe.w2_scale.view(torch.uint8), m._moe_prefill_g2, y)
-    return y, pos
+    return y, pos, None
 
 
 def _prefill(m, x, topk_weights, topk_ids):
     """moe_prefill.cu on the tensors CUTLASS would get; returns the weighted top-k sum."""
-    y, pos = prefill_routed(m, x, topk_weights, topk_ids)
+    y, pos, _ = prefill_routed(m, x, topk_weights, topk_ids)
     out = torch.empty(x.shape[0], m.w2_weight.shape[1], dtype=torch.bfloat16, device=x.device)
     _pext.finalize(y, pos, topk_weights.to(torch.float32).contiguous(), out)
     return out

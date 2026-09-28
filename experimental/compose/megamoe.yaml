@@ -1,7 +1,8 @@
 # megamoe for decode-sized MoE batches (W4A16, CUTLASS's own tensors), and with
 # VLLM_MOE_PREFILL=1 moe_prefill.cu for batches of VLLM_MOE_PREFILL_MIN_TOKENS or
 # more; CUTLASS keeps the sizes in between. Needs snapshot.yaml's loader, which
-# calls megamoe_vllm.install() after loading.
+# calls megamoe_vllm.install() after loading. VLLM_MOE_PREFILL_Y8: fc2's per-expert
+# rows as e4m3 (scale per 128 columns) for the fused SP finalize: half the bytes.
 services:
   glm53:
     volumes:
@@ -15,3 +16,4 @@ services:
       - VLLM_MOE_PREFILL=${VLLM_MOE_PREFILL:-1}
       - VLLM_MOE_PREFILL_MIN_TOKENS=${VLLM_MOE_PREFILL_MIN_TOKENS:-1024}
       - VLLM_MOE_PREFILL_CHECK=${VLLM_MOE_PREFILL_CHECK:-0}
+      - VLLM_MOE_PREFILL_Y8=${VLLM_MOE_PREFILL_Y8:-1}

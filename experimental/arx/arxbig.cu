@@ -19,6 +19,7 @@
 // (or + 3) after this rank posted seq + 1, which it does after its stream
 // finished with seq.
 #include <cuda_bf16.h>
+#include <cuda_fp8.h>
 #include <cuda_runtime.h>
 #include <infiniband/verbs.h>
 
@@ -210,9 +211,13 @@ __device__ __host__ __forceinline__ void row_piece(int64_t Rr, int k, int64_t& l
 // zero for padding rows t >= T. Blocks take rows piece-major (piece 0 of
 // every destination first) and the last block of a piece publishes it, so
 // the network starts while later rows are still being computed.
-__global__ void finalize_rs_kernel(Dev d, const __nv_bfloat16* __restrict__ y, const int* __restrict__ pos,
-                                   const float* __restrict__ w, const __nv_bfloat16* __restrict__ shared, int64_t T,
-                                   int64_t Tpad, int H, int topk, uint64_t seq) {
+// y8s != nullptr: y holds e4m3 bytes with one fp32 scale per (row, 128 columns).
+__global__ void finalize_rs_kernel(Dev d, const void* __restrict__ yv, const float* __restrict__ y8s,
+                                   const int* __restrict__ pos, const float* __restrict__ w,
+                                   const __nv_bfloat16* __restrict__ shared, int64_t T, int64_t Tpad, int H, int topk,
+                                   uint64_t seq) {
+  const __nv_bfloat16* y = reinterpret_cast<const __nv_bfloat16*>(yv);
+  const uint8_t* y8 = reinterpret_cast<const uint8_t*>(yv);
   const int64_t Rr = Tpad / d.world;
   int64_t b = blockIdx.x, lo = 0, hi = 0;
   int k = 0;
@@ -243,6 +248,17 @@ __global__ void finalize_rs_kernel(Dev d, const __nv_bfloat16* __restrict__ y, c
         acc[2 * i] = f.x; acc[2 * i + 1] = f.y;
       }
       for (int q = 0; q < topk; ++q) {
+        if (y8s != nullptr) {
+          const uint2 v = *reinterpret_cast<const uint2*>(y8 + (size_t)ps[q] * H + c);
+          const float f = ws[q] * y8s[(size_t)ps[q] * (H / 128) + c / 128];
+          const __nv_fp8x4_e4m3* q4 = reinterpret_cast<const __nv_fp8x4_e4m3*>(&v);
+#pragma unroll
+          for (int i = 0; i < 2; ++i) {
+            const float4 x4 = static_cast<float4>(q4[i]);
+            acc[4 * i] += f * x4.x; acc[4 * i + 1] += f * x4.y; acc[4 * i + 2] += f * x4.z; acc[4 * i + 3] += f * x4.w;
+          }
+          continue;
+        }
         const uint4 v = *reinterpret_cast<const uint4*>(y + (size_t)ps[q] * H + c);
         const __nv_bfloat162* b2 = reinterpret_cast<const __nv_bfloat162*>(&v);
 #pragma unroll
@@ -552,16 +568,17 @@ torch::Tensor rs_input(std::vector<int64_t> shape) {
 // rank's [Tpad / world, H] sum. y bf16 [R, H], pos int32 [T * topk],
 // w fp32 [T, topk] (routing weights, scale folded in), shared bf16 [T, H].
 int64_t moe_finalize_rs(torch::Tensor y, torch::Tensor pos, torch::Tensor w, torch::Tensor shared, int64_t T,
-                        int64_t Tpad) {
+                        int64_t Tpad, c10::optional<torch::Tensor> y8s) {
   TORCH_CHECK(S.connected && !g_err && S.rs_slot_bytes, "arxbig: reduce_scatter unavailable");
   const int H = y.size(1), topk = w.size(1);
   TORCH_CHECK(Tpad % S.world == 0 && Tpad / S.world >= kChunks && T <= Tpad && topk <= 16 && H % 8 == 0);
   TORCH_CHECK((size_t)Tpad * H * 2 <= S.slot_bytes, "arxbig: MoE output larger than a slot");
   TORCH_CHECK(y.is_contiguous() && pos.is_contiguous() && w.is_contiguous() && shared.is_contiguous());
+  TORCH_CHECK(!y8s.has_value() || (y.scalar_type() == at::kByte && H % 128 == 0), "arxbig: y8s needs e4m3 y");
   const uint64_t seq = ++g_seq;
   finalize_rs_kernel<<<Tpad, 128, 0, at::cuda::getCurrentCUDAStream()>>>(
-      S.dev, (const __nv_bfloat16*)y.data_ptr(), pos.data_ptr<int>(), w.data_ptr<float>(),
-      (const __nv_bfloat16*)shared.data_ptr(), T, Tpad, H, topk, seq);
+      S.dev, y.data_ptr(), y8s.has_value() ? y8s->data_ptr<float>() : nullptr, pos.data_ptr<int>(),
+      w.data_ptr<float>(), (const __nv_bfloat16*)shared.data_ptr(), T, Tpad, H, topk, seq);
   return (int64_t)seq;
 }
 
@@ -581,7 +598,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("all_gather", &all_gather);
   m.def("reduce_scatter", &reduce_scatter);
   m.def("rs_input", &rs_input);
-  m.def("moe_finalize_rs", &moe_finalize_rs);
+  m.def("moe_finalize_rs", &moe_finalize_rs, py::arg("y"), py::arg("pos"), py::arg("w"), py::arg("shared"), py::arg("T"), py::arg("Tpad"), py::arg("y8s") = py::none());
   m.def("rs_finish", &rs_finish);
   m.def("failed", &failed);
 }
