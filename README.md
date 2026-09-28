@@ -277,8 +277,7 @@ needs that agent or plain ssh.
 
 ## Tuning
 
-This is tuned for one or two interactive users, not for a serving fleet. The
-bias throughout is that **a long prefill must never block a short request**,
+The bias throughout is that **a long prefill must never block a short request**,
 and that a single stream should be fast, rather than maximising aggregate
 throughput at concurrency. Every value below is the entrypoint's default.
 
@@ -290,7 +289,7 @@ throughput at concurrency. Every value below is the entrypoint's default.
 | `FABRIC_SUBNETS` | both roots | Each GB10's ConnectX-7 sits on two PCIe roots and one root tops out near 110 Gb/s. NCCL over both doubles all-reduce bandwidth (110 to 190 Gb/s) and took a 126k prefill from 2,412 to 2,680 tok/s (2026-09-26); decode did not move. Needs an IPv4 on the second root's interface in its own subnet, MTU 9000, and the same RoCE v2 GID index on both roots. Set it in `.env`; empty uses `CLUSTER_SUBNET` alone. |
 | `MAX_NUM_SEQS` | 32 | Each running request holds a KDA recurrent state for every verify position (1+k = 8 at k=7) out of the KV pool, so the pool caps this, not throughput. With the overrides the drafter's KV moves to its own pool and 50 fit. |
 | DFlash2 `k=7` | | Decodes 109.8 / 88.8 / 52.6 tok/s structured / code / prose, where the checkpoint's own MTP head at k=4 gave 57.2 / 54.4 / 45.6 on an earlier image (both 2026-09-23). Costs ~41% of the KV pool: 3.44M tokens with speculation off, 2.02M with it at the same pin, on the pre-nightly image (2026-09-06). |
-| `MOE_BACKEND` | `flashinfer_cutlass` | The native NVFP4 kernel, reading the checkpoint's own input scales. `marlin` (weight-only) also works. |
+| `MOE_BACKEND` | `flashinfer_cutlass` | NVFP4 weights and activations, quantizing activations with the checkpoint's own input scales. The MoE kernels in `experimental/` read its processed tensors, so they need it. `marlin` keeps activations in 16 bits and ignores the input scales. It ran on earlier images and is untested on this one. |
 | `SAFETENSORS_LOAD_STRATEGY` | eager | Loads in 511 s against 690 s for lazy. Unpinned, eager's buffers cost 38% of the KV cache; with the pin they cost nothing. |
 | `busy_loop_s` | 0.002 | See Patches. Raises decode and drops the SoC ~20 °C. |
 | `GPU_MEM_UTIL` | 0.88 | 0.90 passes every startup check and wedges the box hours later. See Troubleshooting. |
