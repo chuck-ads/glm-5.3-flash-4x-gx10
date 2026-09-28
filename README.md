@@ -5,20 +5,33 @@ RoCE, with DFlash2 speculative decoding and a 524k context window. The base
 is a stock vLLM nightly plus a handful of small patches and a newer FlashKDA.
 Ray is replaced by [mentat](https://github.com/mmastrac/mentat).
 
-Measured 2026-09-26 on this image (nightly ddd6fbca), temperature 0, single
-stream, nvidia/GLM-5.3-Flash-NVFP4, both ConnectX-7 PCIe roots in use. Prefill
-is first-touch (`dev/repro/prefill.py`). Decode is thinking off, 512 tokens,
-median of 3 (`dev/repro/decode.py`), with DFlash2 acceptance beside it.
+Measured on the same four boxes, 2026-09-27 and 28, on this image (nightly
+ddd6fbca), temperature 0, nvidia/GLM-5.3-Flash-NVFP4, both ConnectX-7 PCIe
+roots in use. "Stock" is `compose/glm53.yaml` alone. "Overrides" adds every
+file in `experimental/compose/`: RDMA collectives, weight snapshots, FP8 and
+NVFP4 dense layers, custom MoE and attention kernels, sequence parallel
+prefill and a draft-length scheduler. They replace files inside this image, so
+they only apply to it. [experimental/README.md](experimental/README.md) has
+the details and how to turn each one off.
 
-| | |
-|---|---|
-| prefill @32k | 2,730 tok/s |
-| prefill @124k | 2,679 tok/s (46.2 s) |
-| decode, counting | 109.9 tok/s (97% accepted) |
-| decode, code | 84.4 tok/s (75%) |
-| decode, prose | 38.4 tok/s (25%) |
-| KV pool | 2,632,595 tokens (26 GiB, fp8_e4m3) |
-| needle recall, 34k and 145k at three depths | 6/6 |
+| | stock | overrides |
+|---|---|---|
+| prefill @32k, cold | 2,730 tok/s | 4,946 tok/s |
+| prefill @128k, cold | 2,679 tok/s | 4,750 tok/s |
+| decode, counting | 121.9 tok/s | 170.3 tok/s |
+| decode, code | 91.3 tok/s | 120.8 tok/s |
+| decode, prose | 38.7 tok/s | 65.8 tok/s |
+| 1 / 2 / 4 / 8 streams, aggregate | 85.5 / 65.4 / 99.5 / 147.8 tok/s | 126 / 102 / 146 / 198 tok/s |
+| 16 streams, aggregate | | 271 tok/s |
+| KV pool (26 GiB pin, fp8_e4m3) | 2.63M tokens | 3.63M tokens |
+| requests decoding at once | 32 | 50 |
+| boot, once snapshots exist | ~8 min | ~3.5 min |
+| needle recall | | 12/12 up to 507k tokens |
+
+Prefill is first-touch on random words, so nothing is cached. Decode is
+thinking off, 512 tokens, median of 3 (`dev/repro/decode.py`). Streams each
+generate 512 tokens from rotating code and prose prompts. GSM8K, HumanEval
+and the tool-call checks come out the same or better with the overrides.
 
 [model.yaml](model.yaml) has the checkpoints and the memory footprint, and
 [KNOBS.md](KNOBS.md) lists every environment variable the entrypoint reads.
@@ -321,7 +334,7 @@ throughput at concurrency. Every value below is the entrypoint's default.
 | `MAX_NUM_BATCHED_TOKENS` | 16384 | Measured the same as 8192 at 200k once chunks are capped (234.1 s against 237.7 s, 2026-09-06). |
 | `KV_CACHE_MEMORY` | 26 GiB | 2.63M tokens with DFlash2. Pinned, `--gpu-memory-utilization` no longer sizes the pool, and vLLM says so at startup. At 28 GiB the head sat near 1 GiB free and eight long requests had a worker OOM-killed. |
 | `FABRIC_SUBNETS` | both roots | Each GB10's ConnectX-7 sits on two PCIe roots and one root tops out near 110 Gb/s. NCCL over both doubles all-reduce bandwidth (110 to 190 Gb/s) and took a 126k prefill from 2,412 to 2,680 tok/s (2026-09-26); decode did not move. Needs an IPv4 on the second root's interface in its own subnet, MTU 9000, and the same RoCE v2 GID index on both roots. Set it in `.env`; empty uses `CLUSTER_SUBNET` alone. |
-| `MAX_NUM_SEQS` | 32 | Capped by the KDA recurrent state: exactly 32 fit after weights. With DFlash2 k=7 a decode step costs 1+k=8 token slots per sequence. |
+| `MAX_NUM_SEQS` | 32 | Each running request holds a KDA recurrent state for every verify position (1+k = 8 at k=7) out of the KV pool, so the pool caps this, not throughput. With the overrides the drafter's KV moves to its own pool and 50 fit. |
 | DFlash2 `k=7` | | Decodes 109.8 / 88.8 / 52.6 tok/s structured / code / prose, where the checkpoint's own MTP head at k=4 gave 57.2 / 54.4 / 45.6 on an earlier image (both 2026-09-23). Costs ~41% of the KV pool: 3.44M tokens with speculation off, 2.02M with it at the same pin, on the pre-nightly image (2026-09-06). |
 | `MOE_BACKEND` | `flashinfer_cutlass` | The native NVFP4 kernel, reading the checkpoint's own input scales. `marlin` (weight-only) also works. |
 | `SAFETENSORS_LOAD_STRATEGY` | eager | Loads in 511 s against 690 s for lazy. Unpinned, eager's buffers cost 38% of the KV cache; with the pin they cost nothing. |

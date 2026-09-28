@@ -70,10 +70,12 @@ Single stream, thinking off, 512 tokens (`dev/repro/decode.py` prompts):
 | all overrides | 170.3 | 120.8 | 65.8 |
 
 Concurrent streams, aggregate tok/s at 1/2/4/8 streams: v8 85.5/65.4/99.5/147.8,
-all overrides 125.2/102.5/145.7/191.6 (16 streams: 251.3). RigMark
-(reasoning=low) code / prose / structured 107.9 / 61.7 / 157.1 tok/s. Needle
-retrieval 12/12 up to 507k tokens. KV cache 3.67M tokens per rank at the
-26 GiB pin (2.63M before the drafter got its own pool).
+all overrides 126/102/146/198 (16 streams: 271). With a different prompt per
+stream, code runs 317 tok/s at 16 streams and 451 at 32, and 50 mixed streams
+run 404. RigMark (reasoning=low) code / prose / structured 107.9 / 61.7 / 157.1
+tok/s. Needle retrieval 12/12 up to 507k tokens. KV cache 3.63M tokens per
+rank at the 26 GiB pin and 50 sequences (2.63M before the drafter got its own
+pool).
 
 Cold prefill, tok/s (random-word prompts, nothing cached):
 
