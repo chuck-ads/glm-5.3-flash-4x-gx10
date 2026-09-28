@@ -59,8 +59,12 @@ def _load_prefill():
     return _pext
 
 
-def prefill_routed(m, x, topk_weights, topk_ids, y8: bool = False):
+def prefill_routed(m, x, topk_weights, topk_ids, y8: bool = False, x4=None):
     """moe_prefill.cu's fc1 and fc2 on the tensors CUTLASS would get.
+
+    x4 = (xq, xs, block): x already quantized by scaled_fp4_quant in blocks
+    of `block` rows, each padded to a multiple of 128 rows (the SP gather of
+    each rank's rows). x then only gives the shape and device.
 
     Returns (y, pos, y8s): y [M * topk, H] holds each (token, k) expert output
     in expert-sorted order, pos [M * topk] its row. With y8, y is e4m3 bytes
@@ -72,7 +76,10 @@ def prefill_routed(m, x, topk_weights, topk_ids, y8: bool = False):
     M, topk = topk_ids.shape
     from vllm import _custom_ops as ops
 
-    xq, xs = ops.scaled_fp4_quant(x, m._moe_prefill_a1)
+    if x4 is None:
+        xq, xs = ops.scaled_fp4_quant(x, m._moe_prefill_a1)
+    else:
+        xq, xs, block = x4
     ids = topk_ids.to(torch.int32)
     flat = ids.flatten().long()
     R = flat.numel()
@@ -88,7 +95,10 @@ def prefill_routed(m, x, topk_weights, topk_ids, y8: bool = False):
     tiles = torch.stack([te, tm], 1).int().contiguous()
     pos = torch.empty(R, dtype=torch.int32, device=x.device)
     pos[order] = torch.arange(R, dtype=torch.int32, device=x.device)
-    rows = (order // topk).int()
+    rows = order // topk
+    if x4 is not None and block % 128:
+        rows = rows // block * ((block + 127) // 128 * 128) + rows % block
+    rows = rows.int()
     hq = torch.empty(R, I // 2, dtype=torch.uint8, device=x.device)
     hs = torch.empty(((R + 127) // 128) * 128 * (I // 16), dtype=torch.uint8, device=x.device)
     _pext.fc1(xq, xs.view(torch.uint8).flatten(), rows, off, tiles, w13, fe.w1_scale.view(torch.uint8),

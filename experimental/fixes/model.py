@@ -106,6 +106,10 @@ _ARX_PREFETCH = os.environ.get("VLLM_GLM_ARX_PREFETCH") == "1"
 # the RDMA reduce-scatter while the network already sends finished rows. The
 # runner's separate scale and add passes and the NCCL reduce-scatter go away.
 _SP_MOE_FUSED = os.environ.get("VLLM_GLM_SP_MOE_FUSED") == "1"
+# Route each rank's own rows, then gather the MoE input already quantized:
+# NVFP4 for the routed experts and per-token FP8 for the shared expert, the
+# same values each would compute from the gathered bf16 rows.
+_SP_MOE_QUANT_GATHER = os.environ.get("VLLM_GLM_SP_MOE_QUANT_GATHER") == "1"
 _sp_moe_check = int(os.environ.get("VLLM_GLM_SP_MOE_CHECK", "0"))
 _sp_active = False
 
@@ -616,34 +620,67 @@ class Glm5NextDecoderLayer(nn.Module):
 
         return x, residual, post, comb
 
-    def _sp_moe_fused(self, big, shard: torch.Tensor, n: int) -> torch.Tensor:
+    def _sp_moe_fused(self, big, shard: torch.Tensor, n: int, quantized: bool = _SP_MOE_QUANT_GATHER) -> torch.Tensor:
         """SP MoE layer: gather, route, experts, and a reduce-scatter fed row by row."""
         global _sp_moe_check
         from vllm.model_executor.layers.fused_moe import megamoe_vllm
 
-        x = sp_all_gather(shard)[:n]
         moe = self.mlp
         runner = moe.experts
-        logits = moe.gate(x)
-        logits = logits[0] if isinstance(logits, tuple) else logits
-        topk_weights, topk_ids = runner.router.select_experts(
-            hidden_states=x, router_logits=logits,
-            topk_indices_dtype=runner._quant_method.topk_indices_dtype)
-        shared = moe.shared_experts(x)
         routed = self.__dict__.get("_moe_prefill_layer")
         if routed is None:
             routed = next(m for m in moe.modules() if hasattr(m, "_moe_prefill_experts"))
             self.__dict__["_moe_prefill_layer"] = routed
-        y, pos, y8s = megamoe_vllm.prefill_routed(routed, x, topk_weights, topk_ids, megamoe_vllm._PREFILL_Y8)
+
+        def route(x):
+            logits = moe.gate(x)
+            logits = logits[0] if isinstance(logits, tuple) else logits
+            return runner.router.select_experts(
+                hidden_states=x, router_logits=logits,
+                topk_indices_dtype=runner._quant_method.topk_indices_dtype)
+
+        H = shard.shape[1]
+        if quantized:
+            from vllm import _custom_ops as ops
+            from vllm.model_executor.model_loader import dense_fp8
+
+            shard = shard.contiguous()
+            rows = shard.shape[0]
+            topk_weights, topk_ids = route(shard)
+            topk_weights = sp_all_gather(topk_weights.float().contiguous())[:n]
+            topk_ids = sp_all_gather(topk_ids.contiguous())[:n]
+            x4 = shard if rows % 128 == 0 else torch.nn.functional.pad(shard, (0, 0, 0, -rows % 128))
+            q4, s4 = ops.scaled_fp4_quant(x4, routed._moe_prefill_a1)
+            q4 = sp_all_gather(q4)
+            s4 = sp_all_gather(s4.view(torch.uint8).flatten())
+            xq, xs = ops.scaled_fp8_quant(shard, use_per_token_if_dynamic=True)
+            xq = sp_all_gather(xq.view(torch.uint8))[:n].view(torch.float8_e4m3fn)
+            xs = sp_all_gather(xs)[:n]
+            placeholder = shard.new_empty(n, H)
+            dense_fp8.prequant(placeholder, xq, xs)
+            shared = moe.shared_experts(placeholder)
+            y, pos, y8s = megamoe_vllm.prefill_routed(
+                routed, placeholder, topk_weights, topk_ids, megamoe_vllm._PREFILL_Y8, x4=(q4, s4, rows))
+        else:
+            x = sp_all_gather(shard)[:n]
+            topk_weights, topk_ids = route(x)
+            shared = moe.shared_experts(x)
+            y, pos, y8s = megamoe_vllm.prefill_routed(routed, x, topk_weights, topk_ids, megamoe_vllm._PREFILL_Y8)
         w = (topk_weights.float() * runner.routed_scaling_factor).contiguous()
         n_pad = shard.shape[0] * get_tensor_model_parallel_world_size()
         seq = big.moe_finalize_rs(y, pos, w, shared.contiguous(), n, n_pad, y8s)
-        out = big.rs_finish(seq, shard.shape[0], x.shape[1])
+        out = big.rs_finish(seq, shard.shape[0], H)
         if _sp_moe_check > 0:
-            _sp_moe_check -= 1
+            left, _sp_moe_check = _sp_moe_check - 1, 0
+            x = sp_all_gather(shard)[:n]
             ref = sp_reduce_scatter(self.mlp(x))
             rel = ((out.float() - ref.float()).norm() / ref.float().norm()).item()
             logger.warning("SP MoE fused check: %d tokens, rel diff vs runner %.5f", n, rel)
+            if quantized:
+                alt = self._sp_moe_fused(big, shard, n, False)
+                rel = ((out.float() - alt.float()).norm() / alt.float().norm()).item()
+                logger.warning("SP MoE fused check: rel diff vs the bf16 gather %.6f", rel)
+            _sp_moe_check = left
         return out
 
     def _after_attn_weights(self) -> list:

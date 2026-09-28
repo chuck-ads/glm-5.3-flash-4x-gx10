@@ -34,6 +34,7 @@ Leave a compose file out to drop that piece, or set its switch in `.env` (every 
 | `VLLM_GLM_SP_TP` | 1 | sequence parallelism for forwards of `VLLM_GLM_SP_MIN_TOKENS` (1024) or more (sp.yaml) |
 | `VLLM_GLM_SP_FP8_GATHER` | 1 | gather KDA attention inputs as FP8 |
 | `VLLM_GLM_SP_MOE_FUSED` | 1 | MoE combine feeding the RDMA reduce-scatter; needs arx.yaml with `VLLM_ARXBIG_RS=1` and megamoe.yaml with `VLLM_MOE_PREFILL=1` |
+| `VLLM_GLM_SP_MOE_QUANT_GATHER` | 1 | with `VLLM_GLM_SP_MOE_FUSED`: route each rank's own rows and gather the MoE input as NVFP4 + FP8 instead of bf16 (same results) |
 | `VLLM_GLM_ARX_PREFETCH` | 1 | L2 prefetch during decode all-reduces; needs arx.yaml |
 | `VLLM_MEGAMOE` | 1 | decode MoE kernel for batches of up to `VLLM_MEGAMOE_MAX_TOKENS` (8) |
 | `VLLM_MOE_PREFILL` | 1 | prefill MoE kernel for batches of `VLLM_MOE_PREFILL_MIN_TOKENS` (1024) or more |
@@ -64,7 +65,7 @@ Single stream, thinking off, 512 tokens (`dev/repro/decode.py` prompts):
 
 Concurrent streams, aggregate tok/s at 1/2/4/8 streams: v8 85.5/65.4/99.5/147.8,
 all overrides 122.5/99.8/139.3/189.8. RigMark (reasoning=low) code / prose /
-structured 101.2 / 59.8 / 153.9 tok/s, 64k cold prefill 4,523 tok/s. Needle
+structured 101.2 / 59.8 / 153.9 tok/s, 64k cold prefill 4,885 tok/s. Needle
 retrieval 12/12 up to 507k tokens.
 
 Cold prefill, tok/s (random-word prompts, nothing cached):
@@ -72,7 +73,7 @@ Cold prefill, tok/s (random-word prompts, nothing cached):
 | | 32k | 128k |
 |---|---|---|
 | v8 | 2,730 | 2,679 |
-| all overrides | 4,728 | 4,560 |
+| all overrides | 4,853 | 4,655 |
 
 Boot goes from about 8 minutes to about 3.5 once snapshots exist.
 
@@ -146,6 +147,12 @@ Boot goes from about 8 minutes to about 3.5 once snapshots exist.
   With `VLLM_MOE_PREFILL_Y8` (default) fc2 writes its per-expert rows as e4m3
   with a scale per 128 columns, halving the 1.07 GB each layer writes and reads
   back: prefill +5%, GSM8K/HumanEval/NLL/tool-call results unchanged.
+  With `VLLM_GLM_SP_MOE_QUANT_GATHER` (default) each rank routes its own rows
+  and quantizes them the way the experts would (NVFP4 for the routed experts,
+  per-token FP8 for the shared expert's GEMM), and the gather moves those
+  instead of bf16: 0.56 + 1 bytes per value instead of 2, and a quarter of the
+  fp32 router GEMM per rank. The layer output matches the bf16 gather to
+  within 1e-4 relative; prefill +3-4%.
   All ranks write to all peers at once and this fabric has no PFC, so
   incast drops packets and go-back-N retransmits make individual calls vary
   (4-9 ms); per-destination serialization was worse (two QPs cannot fill a

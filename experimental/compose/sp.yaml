@@ -10,6 +10,9 @@
 # VLLM_GLM_SP_MOE_FUSED: MoE layers under SP compute shared + scaled routed
 # sum in one kernel that feeds arxbig's RDMA reduce-scatter row by row (needs
 # arx.yaml with VLLM_ARXBIG_RS=1 and megamoe.yaml with VLLM_MOE_PREFILL=1).
+# VLLM_GLM_SP_MOE_QUANT_GATHER: those layers route each rank's own rows and
+# gather the input already quantized (NVFP4 for the routed experts, FP8 for the
+# shared expert) instead of as bf16, matching it to within 1e-4 relative.
 services:
   glm53:
     volumes:
@@ -20,4 +23,5 @@ services:
       - VLLM_GLM_SP_FP8_GATHER=${VLLM_GLM_SP_FP8_GATHER:-1}
       - VLLM_GLM_ARX_PREFETCH=${VLLM_GLM_ARX_PREFETCH:-1}
       - VLLM_GLM_SP_MOE_FUSED=${VLLM_GLM_SP_MOE_FUSED:-1}
+      - VLLM_GLM_SP_MOE_QUANT_GATHER=${VLLM_GLM_SP_MOE_QUANT_GATHER:-1}
       - VLLM_GLM_SP_MOE_CHECK=${VLLM_GLM_SP_MOE_CHECK:-0}
