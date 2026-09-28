@@ -246,8 +246,13 @@ load cleanly, report healthy and serve fluent nonsense. The first fails
 against any model that is not a GLM-5.3 checkpoint. Exit status is the number
 of failures. See [smoketest/README.md](smoketest/README.md).
 
-Send one throwaway request before timing anything: the first request after a
-cold boot JIT-compiles DFlash2 shapes and can take minutes.
+The first run after a fresh install is slow. Kernels compile the first time
+each batch shape and draft length comes up, and on an empty cache that happens
+inside your first requests: the first request can take minutes, and the first
+pass over several concurrency levels runs well below the numbers at the top
+(code at 4 streams: 127 tok/s on the first pass, 196 after a restart). The
+compiled kernels are kept in `CACHE_HOME`, so restarts and later boots start
+warm. Run your workload once, or restart once, before timing anything.
 
 ## Roll back
 
@@ -466,8 +471,10 @@ keeps the cache ephemeral at TP>1 and wipes it at every start, which costs
 about two minutes of autotune a boot; `AUTOTUNE_CACHE=persist` brings the old
 behaviour back.
 
-**The first request after a cold boot takes minutes.** Triton JIT-compiles
-DFlash2 shapes mid-serve. Send one throwaway request before timing anything.
+**The first requests after a fresh install are slow.** Kernels compile the
+first time each batch shape comes up, mid-serve, and the first request can
+take minutes. It happens once per shape per `CACHE_HOME`: clearing that cache
+or its volume brings it back. Run the workload once before timing anything.
 
 **A value in `.env` does nothing.** `.env` only substitutes into the compose
 file; a variable reaches the container only if `compose/glm53.yaml` lists it
