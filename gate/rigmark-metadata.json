@@ -1,0 +1,17 @@
+{
+  "competing_traffic": "none; four nodes dedicated",
+  "context_limit": 524288,
+  "hardware": "4 x ASUS Ascent GX10 (NVIDIA GB10, 128 GB unified memory each)",
+  "kv_cache_dtype": "fp8_e4m3",
+  "model": "nvidia/GLM-5.3-Flash-NVFP4 (ModelOpt)",
+  "quantisation": "ModelOpt NVFP4 routed experts; dense linears FP8 after load, KDA in_proj, o_proj, shared experts and drafter NVFP4",
+  "serving_engine": "vLLM nightly ddd6fbca, this repo's image, with every override in experimental/",
+  "topology": "TP=4 over one 200G switch, both ConnectX ports per node",
+  "selectors": {},
+  "tensor_parallel_size": 4,
+  "max_num_seqs": 50,
+  "proposal_k": 7,
+  "comparison_note": "Same comparison id and seed as ringside-redhat-rowsplit-20260926, for identical prompts; different checkpoint and stack",
+  "checkpoint": "nvidia/GLM-5.3-Flash-NVFP4",
+  "served_model_alias": "glm53"
+}
