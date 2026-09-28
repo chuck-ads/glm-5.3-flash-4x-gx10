@@ -124,8 +124,8 @@ and DFlash2 upstream, and the patches are small anchored edits that fail the
 build if the tree moves under them. The one thing the build compiles is
 FlashKDA (see Patches), in a builder stage that took 98 s on a GX10.
 `image/verify-base.py` then checks the finished tree. The image embeds mentat
-0.12.0, which refuses daemons older than 0.9, so `mentatd` and `mentatd-serve`
-should be 0.12.0 too.
+0.14.0, which refuses daemons older than 0.9, so `mentatd` and `mentatd-serve`
+should be 0.14.0 too.
 
 ## 3. Fill in compose/.env
 
@@ -159,10 +159,14 @@ is fine.
 ## 4. Start mentatd, and mentatd-serve on the head
 
 mentat has its own repo, compose files and `.env`. On every box, in a
-checkout of [mmastrac/mentat](https://github.com/mmastrac/mentat) at `v0.12.0`:
+checkout of [mmastrac/mentat](https://github.com/mmastrac/mentat) at `v0.14.0`:
 
-    VERSION=0.12.0 ./build.sh
+    VERSION=0.14.0 ./build.sh
     echo "MENTAT_PEERS=<head LAN address>:6379" > .env
+
+Or skip the build and add `IMAGE=mmastrac/mentatd:0.14.0` to that `.env`
+(`mmastrac/mentatd-serve:0.14.0` for the router): the published images cover
+arm64.
     docker compose -f mentatd.yaml up -d
 
 The daemon names the box by its default route's address, which must be the
