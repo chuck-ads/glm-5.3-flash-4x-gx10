@@ -125,6 +125,11 @@ Boot goes from about 8 minutes to about 3.5 once snapshots exist.
     indices. `gb10_sparse_mla.py` is a Triton kernel for GLM's NoPE MLA (one
     program per query, all 16 heads, 32 gathered keys per block) that runs
     3.3x faster. `VLLM_TRITON_SPARSE_MLA=0` goes back to FlashInfer.
+  - FlashKDA needs dense q, k and v, and the KDA short conv wrote them as one
+    [tokens, 3 x 2048] tensor, so each KDA layer copied three 56 MB tensors
+    per 16k-token step. `causal_conv1d.py` gains an `out_group` argument that
+    writes each group of features as its own dense tensor, and `kda.py` uses
+    it. The outputs are bit-identical; prefill +2-3%.
 - **sp** (`fixes/model.py`): sequence parallelism for prefill. A forward of
   at least 1024 tokens keeps the residual stream split across the TP ranks, so
   mHC and the norms run on a quarter of the tokens, with an all-gather before

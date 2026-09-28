@@ -1,7 +1,9 @@
 # Fixes found by profiling (2026-09-27): FlashInfer's per-step rollback clone,
 # the indexer's fp32 head-gate GEMM, a switch for the fused mHC kernel's token
 # limit, and a Triton sparse MLA kernel in place of FlashInfer's FA2 path
-# (VLLM_TRITON_SPARSE_MLA=1, about 3.3x faster on GB10).
+# (VLLM_TRITON_SPARSE_MLA=1, about 3.3x faster on GB10). kda.py and
+# causal_conv1d.py: the KDA short conv writes q, k and v as separate dense
+# tensors, so FlashKDA no longer copies them (~51 ms per 16k-token step).
 services:
   glm53:
     volumes:
@@ -11,6 +13,8 @@ services:
       - ../experimental/fixes/flashinfer_mla_sparse_sm90.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/mla/flashinfer_mla_sparse_sm90.py:ro
       - ../experimental/fixes/gb10_sparse_mla.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/mla/gb10_sparse_mla.py:ro
       - ../experimental/fixes/gdn_attn.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/gdn_attn.py:ro
+      - ../experimental/fixes/kda.py:/usr/local/lib/python3.12/dist-packages/vllm/models/glm5next/common/kda.py:ro
+      - ../experimental/fixes/causal_conv1d.py:/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/mamba/ops/causal_conv1d.py:ro
     environment:
       - VLLM_MHC_FUSED_MAX_TOKENS=${VLLM_MHC_FUSED_MAX_TOKENS:-32}
       - VLLM_TRITON_SPARSE_MLA=${VLLM_TRITON_SPARSE_MLA:-1}
