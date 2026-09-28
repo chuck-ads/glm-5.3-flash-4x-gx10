@@ -17,7 +17,7 @@ this repo builds, and each one can be turned off.
 |---|---|
 | prefill @32k, cold | 4,946 tok/s |
 | prefill @128k, cold | 4,750 tok/s |
-| decode, counting / code / prose | 170.3 / 120.8 / 65.8 tok/s |
+| decode, code / prose / structured | 107.9 / 61.7 / 157.1 tok/s |
 | 1 / 2 / 4 / 8 / 16 streams, aggregate | 126 / 102 / 146 / 198 / 271 tok/s |
 | KV pool (26 GiB pin, fp8_e4m3) | 3.63M tokens |
 | requests decoding at once | 50 |
@@ -25,16 +25,9 @@ this repo builds, and each one can be turned off.
 | needle recall | 12/12 up to 507k tokens |
 
 Prefill is first-touch on random words, so nothing is cached. Decode is
-thinking off, 512 tokens, median of 3 (`dev/repro/decode.py`). Streams each
-generate 512 tokens from rotating code and prose prompts.
-
-[RigMark](https://github.com/alexellis/rigmark), reasoning effort low:
-
-| | |
-|---|---|
-| decode, code / prose / structured | 107.9 / 61.7 / 157.1 tok/s |
-| prefill @8k, cold / immediate replay | 4,647 / 10,476 tok/s |
-| output gates | 6/6 |
+[RigMark](https://github.com/alexellis/rigmark)'s single-stream decode,
+reasoning effort low, with its output gates passing 6/6. Streams each generate
+512 tokens from rotating code and prose prompts.
 
 [model.yaml](model.yaml) has the checkpoints and the memory footprint, and
 [KNOBS.md](KNOBS.md) lists every environment variable the entrypoint reads.
