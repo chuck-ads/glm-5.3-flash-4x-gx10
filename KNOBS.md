@@ -28,6 +28,8 @@ Meaning and rationale stay in the entrypoint and compose comments.
 | `FABRIC_WAIT_S` | `0` |
 | `GLOO_SOCKET_IFNAME` | _(empty)_ |
 | `GPU_MEM_UTIL` | `0.88` |
+| `HEAD_HOST` | _(none)_ |
+| `ITERATION_DETAILS` | _(empty)_ |
 | `KV_CACHE_DTYPE` | `fp8_e4m3` |
 | `KV_CACHE_MEMORY` | `27917287424` |
 | `LIMIT_MM` | `{\"image\":16,\"video\":0\}` |
@@ -74,4 +76,5 @@ Meaning and rationale stay in the entrypoint and compose comments.
 | `TRITON_CACHE_DIR` | `${CACHE_ROOT}/${SHARED_TAG}/triton` _(derived)_ |
 | `VLLM_ENGINE_READY_TIMEOUT_S` | `3600` |
 | `VLLM_HOST_IP` | _(empty)_ |
+| `VLLM_WEIGHT_SNAPSHOT_DIR` | _(empty)_ |
 | `WORKER_WAIT_S` | `0` |

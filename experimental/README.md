@@ -155,7 +155,8 @@ Boot goes from about 8 minutes to about 3.5 once snapshots exist.
     `worker_utils.py` and `warmup.py` give the drafter's group its own pool
     (sized for `max_num_seqs` windows plus one prefill chunk, 105 blocks,
     0.58 GiB) and keep its block ids out of the target's zeroing and warmup.
-    At the same 26 GiB pin: 1,416 -> 1,976 blocks, 2.63M -> 3.67M KV tokens.
+    At the same 26 GiB pin: 1,416 -> 1,976 blocks, 2.63M -> 3.67M KV tokens
+    at 32 sequences (3.63M at the 50 fixes.yaml sets).
     Draft acceptance and speed are unchanged. `VLLM_GLM5NEXT_DRAFT_POOL=0`
     goes back; `VLLM_GLM5NEXT_DRAFT_POOL_BLOCKS` sets the pool's size.
 - **sp** (`fixes/model.py`): sequence parallelism for prefill. A forward of
@@ -215,8 +216,9 @@ Other people's work in here:
 - arx and arxbig take the RDMA path MTU from the ports rather than assuming
   4096, from [Chuck](https://github.com/chuck-ads)'s
   [#6](https://github.com/mmastrac/glm-5.3-flash-4x-gx10/pull/6).
-- `tilelang_kernels.py` carries vLLM's copy of SGLang's mHC kernel, credited
-  in the file.
+- `tilelang_kernels.py` carries vLLM's copy of SGLang's mHC kernel, and
+  `causal_conv1d.py` vLLM's adaptation of Tri Dao's causal-conv1d, both
+  credited in the file.
 - The decode split in `gb10_sparse_mla.py` is the Flash-Decoding scheme (Dao
   et al., 2023): split each query's keys across programs, then merge the
   partial softmax results.

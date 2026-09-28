@@ -204,7 +204,7 @@ export NCCL_DEBUG="${NCCL_DEBUG:-INFO}"
 # --- preflight: things that make the stack slow or fragile without failing --
 # One table, WARN rows first to read, never fatal. PREFLIGHT=0 skips it.
 preflight() {
-  local rows=() warns=0 dev nd mtu rate state phys cur max tp kv need avail swap fs free apps tmpl
+  local rows=() warns=0 dev nd mtu rate state phys cur max tp kv need avail swap fs free apps
   row() { rows+=("$1|$2|$3"); [[ "$3" == WARN ]] && warns=$(( warns + 1 )); return 0; }
   local -a devs; IFS=, read -r -a devs <<< "$(sed -E 's/^[=^]+//; s/:[0-9]+//g' <<< "$NCCL_IB_HCA")"
   (( ${#devs[@]} >= 2 )) && row "fabric devices" "${NCCL_IB_HCA}" ok \

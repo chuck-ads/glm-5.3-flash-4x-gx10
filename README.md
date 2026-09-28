@@ -118,7 +118,8 @@ builds, because it keeps the hidden `.submodules/` and the symlink; a bare
 boxes (`docker save | ssh ... docker load`, or a registry): every rank must
 run the same image.
 
-The base is `vllm/vllm-openai:nightly-ddd6fbca`, which carries `glm5_next`
+The base is `vllm/vllm-openai:nightly-ddd6fbca148a867aad1fcab7ec72f582b9977db4`
+(the tag is the full commit), which carries `glm5_next`
 and DFlash2 upstream, and the patches are small anchored edits that fail the
 build if the tree moves under them. The one thing the build compiles is
 FlashKDA (see Patches), in a builder stage that took 98 s on a GX10.
@@ -166,8 +167,9 @@ checkout of [mmastrac/mentat](https://github.com/mmastrac/mentat) at `v0.12.0`:
 
 The daemon names the box by its default route's address, which must be the
 `VLLM_HOST_IP` you gave the model. Set `MENTAT_NODE_IP` in mentat's `.env`
-when it is not. The model container registers with the daemon on
-`127.0.0.1:6379`. Then, on the head only:
+when it is not. The model container registers with the head's daemon at
+`HEAD_HOST:6379`, not its own box's (see "Boot hangs at `waiting for 4 GPUs,
+have 1`"). Then, on the head only:
 
     docker compose -f mentatd-serve.yaml up -d
 
@@ -183,7 +185,7 @@ On every box:
 
 From cold, the boxes may start in any order: registration retries until the
 daemon answers, and the head waits for all four GPUs before it loads. The
-weight load takes about ten minutes. The status page on `:8082` answers from
+cold boot takes about eight minutes to reach the API. The status page on `:8082` answers from
 container start, so there is something to read while it loads.
 
 **Replacing a running stack is different.** Recreating all four ranks at once
@@ -254,15 +256,15 @@ Two checks run at every start and print to the container log; neither stops
 the boot:
 
 - `preflight`, on every node, lists what makes the stack slow or fragile:
-  a fabric port down or below 200 Gb/s, a port MTU below 9000, a PCIe link
+  a fabric port down or below 200 Gb/s, a port MTU too small for RoCE's 4096-byte path MTU (under 4200), a PCIe link
   below its maximum, one ConnectX root instead of two, link flaps, RDMA
   retransmit counters, GPU clock-limit events, other GPU processes, too little
   host memory for the TP size and KV pin, page cache the GPU cannot use yet
   (it evicts the model files' cached pages itself), swap in use, a model directory on
-  NFS, no disk for the first weight snapshot, an unpatched chat template, and
-  a memlock limit, and a running desktop session. `PREFLIGHT=0` skips it.
-- `fabric check`, on the head, after every rank has joined (before vLLM
-  starts): an NCCL all-reduce over the fabric with its bus bandwidth against
+  NFS, no disk for the first weight snapshot, a memlock limit, and a running
+  desktop session. `PREFLIGHT=0` skips it.
+- `fabric check`, on every rank before vLLM starts, with the results printed
+  on the head: an NCCL all-reduce over the fabric with its bus bandwidth against
   the ~95 Gb/s per ConnectX root a healthy link gives, and every version,
   override file and knob that must match across nodes, with the ones that do
   not. A fabric can link up at full rate and still move 12 Gb/s until the
@@ -279,16 +281,18 @@ needs that agent or plain ssh.
 
 The bias throughout is that **a long prefill must never block a short request**,
 and that a single stream should be fast, rather than maximising aggregate
-throughput at concurrency. Every value below is the entrypoint's default.
+throughput at concurrency. Every value below is the entrypoint's default,
+except `FABRIC_SUBNETS`, which you set in `.env`, and `busy_loop_s`, which a
+patch bakes into the image.
 
 | knob | value | why |
 |---|---|---|
 | `LONG_PREFILL_TOKEN_THRESHOLD` | 2304 | Caps one prefill's share of each scheduler step. Left at the default (budget − 256) a 120k prefill takes the whole step and a 12-token request waits 78–90 s; at 2304 it waited 4.83 s (2026-09-06). Must be a multiple of 2304, the KDA block size, because prefix caching snaps chunk ends to it: 2048 yields alternating 2048/256-token chunks. Costs nothing: the 200k prefill got *faster*. |
 | `MAX_NUM_BATCHED_TOKENS` | 16384 | Measured the same as 8192 at 200k once chunks are capped (234.1 s against 237.7 s, 2026-09-06). |
 | `KV_CACHE_MEMORY` | 26 GiB | 2.63M tokens with DFlash2. Pinned, `--gpu-memory-utilization` no longer sizes the pool, and vLLM says so at startup. At 28 GiB the head sat near 1 GiB free and eight long requests had a worker OOM-killed. |
-| `FABRIC_SUBNETS` | both roots | Each GB10's ConnectX-7 sits on two PCIe roots and one root tops out near 110 Gb/s. NCCL over both doubles all-reduce bandwidth (110 to 190 Gb/s) and took a 126k prefill from 2,412 to 2,680 tok/s (2026-09-26); decode did not move. Needs an IPv4 on the second root's interface in its own subnet, MTU 9000, and the same RoCE v2 GID index on both roots. Set it in `.env`; empty uses `CLUSTER_SUBNET` alone. |
+| `FABRIC_SUBNETS` | `CLUSTER_SUBNET`, one root | Each GB10's ConnectX-7 sits on two PCIe roots and one root tops out near 110 Gb/s. NCCL over both doubles all-reduce bandwidth (110 to 190 Gb/s) and took a 126k prefill from 2,412 to 2,680 tok/s (2026-09-26); decode did not move. Needs an IPv4 on the second root's interface in its own subnet, MTU 9000, and the same RoCE v2 GID index on both roots. Set both in `.env`, quoted and space-separated (`FABRIC_SUBNETS="10.0.0. 10.0.1."`). Empty uses `CLUSTER_SUBNET` alone. The numbers at the top use both. |
 | `MAX_NUM_SEQS` | 32 | Each running request holds a KDA recurrent state for every verify position (1+k = 8 at k=7) out of the KV pool, so the pool caps this, not throughput. With the overrides the drafter's KV moves to its own pool and 50 fit. |
-| DFlash2 `k=7` | | Decodes 109.8 / 88.8 / 52.6 tok/s structured / code / prose, where the checkpoint's own MTP head at k=4 gave 57.2 / 54.4 / 45.6 on an earlier image (both 2026-09-23). Costs ~41% of the KV pool: 3.44M tokens with speculation off, 2.02M with it at the same pin, on the pre-nightly image (2026-09-06). |
+| DFlash2 `k=7` | | Decodes 121.9 / 91.3 / 38.7 tok/s structured / code / prose on this image without the overrides (`dev/repro/decode.py`, thinking off). On an earlier image (2026-09-23) it gave 109.8 / 88.8 / 52.6, and the checkpoint's own MTP head at k=4 gave 57.2 / 54.4 / 45.6. Costs ~41% of the KV pool: 3.44M tokens with speculation off, 2.02M with it at the same pin, on the pre-nightly image (2026-09-06). |
 | `MOE_BACKEND` | `flashinfer_cutlass` | NVFP4 weights and activations, quantizing activations with the checkpoint's own input scales. The MoE kernels in `experimental/` read its processed tensors, so they need it. `marlin` keeps activations in 16 bits and ignores the input scales. It ran on earlier images and is untested on this one. |
 | `SAFETENSORS_LOAD_STRATEGY` | eager | Loads in 511 s against 690 s for lazy. Unpinned, eager's buffers cost 38% of the KV cache; with the pin they cost nothing. |
 | `busy_loop_s` | 0.002 | See Patches. Raises decode and drops the SoC ~20 °C. |
@@ -337,7 +341,8 @@ them. The old recipe's `gb10_topk_fallback.py` is now a flag
 moves, the ConnectX-7 has latched a slow fallback state from the DAC cables
 being hot-plugged. **Power off and unplug for a minute**: a reboot does not
 clear it, and neither does a NIC hotplug reset. The tell is that NCCL Tree
-beats Ring; healthy is Ring 110 Gb/s, Tree 44. A single unidirectional stream
+beats Ring. Healthy on both roots is Ring 180-191 Gb/s against Tree 55-93
+(NOTES.md). A single unidirectional stream
 cannot see this, which is why the RDMA test passes; a ring collective, sending
 and receiving at once, can.
 
@@ -427,7 +432,7 @@ The right entry is the RoCE v2 one for the box's static fabric address.
 [tonyd2wild](https://github.com/tonyd2wild) ·
 [MiaAI-Lab](https://github.com/MiaAI-Lab) (sm_121 patches, see
 `image/patches/LICENSE.MiaAI-Lab`) ·
-[tonyliu312](https://github.com/tonyliu312) (28 GiB KV pin) ·
+[tonyliu312](https://github.com/tonyliu312) (the KV pin) ·
 [nacyot](https://artifacts.nacyot.com/vllm-spin-wait-gb10-en/) (spin wait) ·
 [alexellis](https://github.com/alexellis/glm-5.3-flash-4x-dgx-spark-switchless),
 and [RigMark](https://github.com/alexellis/rigmark) for the gate ·

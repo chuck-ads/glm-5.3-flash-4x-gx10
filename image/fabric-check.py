@@ -65,7 +65,7 @@ def facts() -> tuple[dict, dict]:
         "driver": driver,
         "entrypoint": sha("/entrypoint.sh"),
         "model config": sha(f"{model}/config.json"),
-        "chat template": sha(f"{model}/chat_template.jinja"),
+        "chat template": sha(os.environ.get("CHAT_TEMPLATE") or "/usr/local/share/glm53-chat-template.jinja"),
         "fabric devices": str(len([d for d in os.environ.get("NCCL_IB_HCA", "").split(",") if d])),
     }
     same.update({k: os.environ.get(k, "") for k in SAME_ENV})
