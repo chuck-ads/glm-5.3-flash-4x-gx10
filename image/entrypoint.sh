@@ -31,13 +31,20 @@ MTP="${MTP:-1}"
 # worker OOM-killed mid-prefill. 4 GiB holds 260k tokens, 160k in one request,
 # and each rank carries half the KDA heads, so a request's per-draft states
 # are twice as big: three short requests run at once, a fourth waits.
+# RecoverSSM (recoverssm.yaml) keeps one state per request instead of 1 + k:
+# 64 run at TP=4, the most whose k=7 steps fit the largest captured graph,
+# and 16 at TP=2, where the pool is 88% full.
+_rs=0; [[ "${VLLM_GLM5NEXT_RECOVERSSM:-0}" == 1 ]] && _rs=1
 case "$TP" in
   4) : "${KV_CACHE_MEMORY:=27917287424}" "${MAX_MODEL_LEN:=524288}"
+     (( _rs )) && : "${MAX_NUM_SEQS:=64}"
      # With the drafter's KV in its own pool (fixes.yaml), ~50 requests' KDA
      # states fit in the pool; without it, 32.
      [[ "${VLLM_GLM5NEXT_DRAFT_POOL:-0}" == 1 ]] && : "${MAX_NUM_SEQS:=50}"
      : "${VLLM_ADAPTIVE_K_MODEL:=27.0,0.635,0.542}" ;;
-  2) : "${KV_CACHE_MEMORY:=4294967296}" "${MAX_MODEL_LEN:=163840}" "${MAX_NUM_SEQS:=4}"
+  2) : "${KV_CACHE_MEMORY:=4294967296}" "${MAX_MODEL_LEN:=163840}"
+     (( _rs )) && : "${MAX_NUM_SEQS:=16}"
+     : "${MAX_NUM_SEQS:=4}"
      # A rank reads twice the expert weights it does at TP=4.
      : "${VLLM_ADAPTIVE_K_MODEL:=35.0,1.27,0.8}" ;;
   *) echo "FATAL: TP=$TP; this recipe is tuned for TP=4 (four boxes) or TP=2 (two)" >&2; exit 1 ;;

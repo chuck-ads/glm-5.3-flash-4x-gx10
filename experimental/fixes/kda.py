@@ -2,6 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """GLM-5.3-Flash KDA layer with separate convolutions and a bounded safe gate."""
 
+import os
+from dataclasses import replace
+
 import torch
 from torch import nn
 
@@ -36,8 +39,18 @@ from vllm.model_executor.utils import (
 from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.transformers_utils.configs.glm5_next import Glm5NextConfig
+from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
+from vllm.v1.kv_cache_interface import KVCacheSpec
 from vllm.v1.worker.workspace import current_workspace_manager
+
+# Spec verify from one checkpoint state per request (recoverssm.py).
+_RECOVERSSM = os.environ.get("VLLM_GLM5NEXT_RECOVERSSM") == "1"
+if _RECOVERSSM:
+    from vllm.models.glm5next.common.recoverssm import (
+        Glm5NextRecoverSSMBackend,
+        kda_recoverssm_verify,
+    )
 
 if current_platform.is_rocm():
     from vllm.models.glm5next.amd.ops.third_party.kda import (
@@ -179,6 +192,18 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             num_spec=self.num_spec,
         )
 
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
+        spec = super().get_kv_cache_spec(vllm_config)
+        if self._recoverssm:
+            # One checkpoint block per request. The commit writes only the final state.
+            spec = replace(spec, num_speculative_blocks=0)
+        return spec
+
+    def get_attn_backend(self) -> type[AttentionBackend]:
+        if self._recoverssm:
+            return Glm5NextRecoverSSMBackend
+        return super().get_attn_backend()
+
     def __init__(
         self,
         config: Glm5NextConfig,
@@ -192,6 +217,9 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             super().__init__(config, vllm_config, prefix)
         finally:
             vllm_config.quant_config = saved_quant_config
+        self._recoverssm = _RECOVERSSM and self.num_spec > 0
+        # The RecoverSSM metadata builder allocates these (recoverssm.Records).
+        self.recoverssm_records = None
 
         self.head_dim = config.linear_head_dim
         self.num_heads = config.linear_num_heads
@@ -479,7 +507,10 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         non_spec_token_indx = attn_metadata_narrowed.non_spec_token_indx
         num_accepted_tokens = attn_metadata_narrowed.num_accepted_tokens
         num_spec_decodes = attn_metadata_narrowed.num_spec_decodes
-        use_spec = spec_sequence_masks is not None and num_spec_decodes > 0
+        # RecoverSSM metadata leaves the mask None. num_spec_decodes marks spec rows.
+        use_spec = num_spec_decodes > 0 and (
+            spec_sequence_masks is not None or self._recoverssm
+        )
         # Safe-gate checkpoints use the bounded sigmoid variant.
         safe_gate = self.kda_safe_gate
         lower_bound = self.kda_lower_bound
@@ -550,7 +581,12 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             assert spec_state_indices_tensor is not None
             assert num_accepted_tokens is not None
             conv_idx = spec_state_indices_tensor[:, 0][:num_spec_decodes]
-            conv_mql = spec_state_indices_tensor.size(-1)
+            # RecoverSSM keeps one state slot, but the window is still k + 1.
+            conv_mql = (
+                self.num_spec + 1
+                if self._recoverssm
+                else spec_state_indices_tensor.size(-1)
+            )
             qkv_spec = causal_conv1d_update(
                 qkv_spec,
                 conv_state,
@@ -611,7 +647,26 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             if non_spec_token_indx is None or non_spec_token_indx.numel() == 0
             else None
         )
-        if use_spec:
+        if use_spec and self._recoverssm:
+            assert spec_state_indices_tensor is not None
+            assert spec_query_start_loc is not None
+            assert self.recoverssm_records is not None
+            core_attn_out_spec = kda_recoverssm_verify(
+                q=_rearr(q_spec),
+                k=_rearr(k_spec),
+                v=_rearr(v_spec),
+                g=g1_spec,
+                beta=beta_spec,
+                a_log=self.A_log,
+                g_bias=self.dt_bias,
+                lower_bound=lower_bound,
+                checkpoint_state=recurrent_state,
+                records=self.recoverssm_records,
+                query_start_loc=spec_query_start_loc[: num_spec_decodes + 1],
+                state_indices=spec_state_indices_tensor[:num_spec_decodes, 0],
+                out=spec_out,
+            )
+        elif use_spec:
             assert spec_state_indices_tensor is not None
             assert num_accepted_tokens is not None
             assert spec_query_start_loc is not None

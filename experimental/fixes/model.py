@@ -112,6 +112,9 @@ _SP_MOE_FUSED = os.environ.get("VLLM_GLM_SP_MOE_FUSED") == "1"
 _SP_MOE_QUANT_GATHER = os.environ.get("VLLM_GLM_SP_MOE_QUANT_GATHER") == "1"
 _sp_moe_check = int(os.environ.get("VLLM_GLM_SP_MOE_CHECK", "0"))
 _sp_active = False
+# KDA spec verify from one checkpoint per request (recoverssm.py). The model
+# supplies the runner state that commits the accepted tokens after sampling.
+_RECOVERSSM = os.environ.get("VLLM_GLM5NEXT_RECOVERSSM") == "1"
 
 
 def _arxbig_rs():
@@ -1171,6 +1174,14 @@ class Glm5NextForCausalLM(
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
 
+    if _RECOVERSSM:
+
+        @staticmethod
+        def get_model_state_cls():
+            from .recoverssm import model_state_cls
+
+            return model_state_cls()
+
     def forward(
         self,
         input_ids: torch.Tensor | None,
@@ -1284,6 +1295,14 @@ class Glm5NextForConditionalGeneration(
         from .model import Glm5NextForCausalLM
 
         return Glm5NextForCausalLM.get_mamba_state_copy_func()
+
+    if _RECOVERSSM:
+
+        @staticmethod
+        def get_model_state_cls():
+            from .recoverssm import model_state_cls
+
+            return model_state_cls()
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super(Glm4vForConditionalGeneration, self).__init__()

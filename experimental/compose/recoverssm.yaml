@@ -1,0 +1,17 @@
+# KDA spec verify from one checkpoint state per request, ported from Kimi-K3's
+# RecoverSSM (fixes/recoverssm.py). Prototype: off unless
+# VLLM_GLM5NEXT_RECOVERSSM=1. The stock spec path keeps 1 + k recurrent states
+# per request and writes one per verified token. This verifies from the
+# checkpoint, records each token's inputs, and after sampling replays only
+# the accepted tokens into it. Each request then holds one KDA block per
+# group, where the stock path holds 1 + k (8 at k=7). The records cost
+# ~3.2 MiB per max_num_seqs row per rank, outside the pinned pool.
+# Stack after fixes.yaml (kda.py, causal_conv1d.py). model.py is sp.yaml's
+# file: it installs the runner's commit hook, and SP stays off without sp.yaml.
+services:
+  glm53:
+    volumes:
+      - ../experimental/fixes/recoverssm.py:/usr/local/lib/python3.12/dist-packages/vllm/models/glm5next/common/recoverssm.py:ro
+      - ../experimental/fixes/model.py:/usr/local/lib/python3.12/dist-packages/vllm/models/glm5next/common/model.py:ro
+    environment:
+      - VLLM_GLM5NEXT_RECOVERSSM=${VLLM_GLM5NEXT_RECOVERSSM:-0}
