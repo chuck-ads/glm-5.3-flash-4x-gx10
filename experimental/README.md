@@ -6,9 +6,9 @@ FlashInfer files, so they only match that image.
 
 ## How to use it
 
-Requirements: the v8 image and the normal four-node setup from the main README (the same `compose/glm53.yaml` and a per-node `compose/.env` on every box). The overrides replace files inside that image, so they do not apply to other images.
+Requirements: the v8 image built from this tree (`image/build.sh`) and the normal four-node setup from the main README (the same `compose/glm53.yaml` and a per-node `compose/.env` on every box). The overrides replace files inside that image, so they do not apply to other images.
 
-1. In each node's `compose/.env`, set the two RDMA devices, one per ConnectX root, in the same subnet order on every node, for example `NCCL_IB_HCA=rocep1s0f0,roceP2p1s0f0`. arx and arxbig need exactly two; with anything else they log a warning and fall back to NCCL. They use `NCCL_IB_GID_INDEX` for the GID index, or 5 if it is unset; check it exists on every node (`ibv_devinfo -v`).
+1. In each node's `compose/.env`, set `FABRIC_SUBNETS` to both ConnectX subnets, one per PCIe root (see `.env.example`). The entrypoint derives `NCCL_IB_HCA` and `NCCL_IB_GID_INDEX` from it, and arx and arxbig use the same two devices; each rank's log shows them (`arx all-reduce: rank r/4 on [dev0, dev1]`). With only one device they log a warning and fall back to NCCL.
 2. Start the stack with every override, on every node (head first, as usual). Order matters: later files win.
 
    ```
@@ -73,7 +73,7 @@ Cold prefill, tok/s (random-word prompts, nothing cached):
 | | 32k | 128k |
 |---|---|---|
 | v8 | 2,730 | 2,679 |
-| all overrides | 4,853 | 4,655 |
+| all overrides | 4,956 | 4,808 |
 
 Boot goes from about 8 minutes to about 3.5 once snapshots exist.
 
