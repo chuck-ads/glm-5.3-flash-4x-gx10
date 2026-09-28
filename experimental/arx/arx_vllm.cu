@@ -332,7 +332,9 @@ void arx_connect(std::vector<std::string> infos) {
     for (int r = 0; r < 2; ++r) {
       if (j == S.rank) continue;
       ibv_qp_attr a{};
-      a.qp_state = IBV_QPS_RTR; a.path_mtu = IBV_MTU_4096; a.dest_qp_num = S.all[j].qpn[S.rank][r]; a.rq_psn = 0;
+      ibv_port_attr port_attr{};
+      IBCK(ibv_query_port(S.ctx[r], 1, &port_attr) == 0);
+      a.qp_state = IBV_QPS_RTR; a.path_mtu = port_attr.active_mtu; a.dest_qp_num = S.all[j].qpn[S.rank][r]; a.rq_psn = 0;
       a.max_dest_rd_atomic = 1; a.min_rnr_timer = 12;
       a.ah_attr.is_global = 1; a.ah_attr.port_num = 1; a.ah_attr.grh.hop_limit = 1;
       a.ah_attr.grh.sgid_index = S.gid_idx;
