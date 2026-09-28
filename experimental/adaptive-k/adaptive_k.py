@@ -65,7 +65,7 @@ _PER_REQUEST = os.environ.get("VLLM_ADAPTIVE_K_PER_REQUEST") == "1"
 _ONLINE = os.environ.get("VLLM_ADAPTIVE_K_ONLINE", "1") == "1"
 # Fitted on GLM-5.3-Flash at TP=4 on GB10 (k 2, 3, 5 and 7 forced, 1-32 streams, code,
 # prose and structured prompts): ms, ms per expert touched, ms per token.
-_MODEL = tuple(float(v) for v in os.environ.get("VLLM_ADAPTIVE_K_MODEL", "27.0,0.635,0.542").split(","))
+_MODEL = tuple(float(v) for v in (os.environ.get("VLLM_ADAPTIVE_K_MODEL") or "27.0,0.635,0.542").split(","))
 # Routed experts and experts per token.
 _EXPERTS, _TOPK = 288, 8
 

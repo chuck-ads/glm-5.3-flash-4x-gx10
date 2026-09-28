@@ -26,7 +26,3 @@ services:
       - VLLM_MHC_FUSED_MAX_TOKENS=${VLLM_MHC_FUSED_MAX_TOKENS:-32}
       - VLLM_TRITON_SPARSE_MLA=${VLLM_TRITON_SPARSE_MLA:-1}
       - VLLM_GLM5NEXT_DRAFT_POOL=${VLLM_GLM5NEXT_DRAFT_POOL:-1}
-      # Each running request holds a KDA state per verify position out of the
-      # KV pool. With the drafter's pool split out, about 50 fit at once, and
-      # 50 x 8 verified tokens stays inside the largest CUDA graph (512).
-      - MAX_NUM_SEQS=${MAX_NUM_SEQS:-50}

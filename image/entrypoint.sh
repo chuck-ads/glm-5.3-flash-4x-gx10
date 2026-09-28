@@ -21,6 +21,28 @@ set -euo pipefail
 
 TP="${TP:-4}"
 MTP="${MTP:-1}"
+
+# --- per-TP defaults ---------------------------------------------------------
+# Each rank holds 1/TP of the weights and of every request's KDA state, so
+# the memory left for KV, and how many requests fit in it, depend on TP. These
+# fill in whatever .env leaves out. TP=4 is the measured four-box setup. TP=2
+# is two boxes: 89.6 GiB of weights and ~27 GiB of graphs, activations and
+# buffers leave ~4 GiB of KV, and the head then has ~1 GiB free. 8 GiB got a
+# worker OOM-killed mid-prefill. 4 GiB holds 260k tokens, 160k in one request,
+# and each rank carries half the KDA heads, so a request's per-draft states
+# are twice as big: three short requests run at once, a fourth waits.
+case "$TP" in
+  4) : "${KV_CACHE_MEMORY:=27917287424}" "${MAX_MODEL_LEN:=524288}"
+     # With the drafter's KV in its own pool (fixes.yaml), ~50 requests' KDA
+     # states fit in the pool; without it, 32.
+     [[ "${VLLM_GLM5NEXT_DRAFT_POOL:-0}" == 1 ]] && : "${MAX_NUM_SEQS:=50}"
+     : "${VLLM_ADAPTIVE_K_MODEL:=27.0,0.635,0.542}" ;;
+  2) : "${KV_CACHE_MEMORY:=4294967296}" "${MAX_MODEL_LEN:=163840}" "${MAX_NUM_SEQS:=4}"
+     # A rank reads twice the expert weights it does at TP=4.
+     : "${VLLM_ADAPTIVE_K_MODEL:=35.0,1.27,0.8}" ;;
+  *) echo "FATAL: TP=$TP; this recipe is tuned for TP=4 (four boxes) or TP=2 (two)" >&2; exit 1 ;;
+esac
+export VLLM_ADAPTIVE_K_MODEL
 # SPEC_METHOD picks the drafter: dflash (the separate DFlash2 draft model at
 # DFLASH_MODEL, which must be mounted on every node; k must be 7, its block
 # size minus one, and the model refuses anything else), mtp (the checkpoint's

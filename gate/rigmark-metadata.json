@@ -4,6 +4,7 @@
   "hardware": "4 x ASUS Ascent GX10 (NVIDIA GB10, 128 GB unified memory each)",
   "kv_cache_dtype": "fp8_e4m3",
   "model": "nvidia/GLM-5.3-Flash-NVFP4 (ModelOpt)",
+  "model_revision": "09b04e5e",
   "quantisation": "ModelOpt NVFP4 routed experts; dense linears FP8 after load, KDA in_proj, o_proj, shared experts and drafter NVFP4",
   "serving_engine": "vLLM nightly ddd6fbca, this repo's image, with every override in experimental/",
   "topology": "TP=4 over one 200G switch, both ConnectX ports per node",

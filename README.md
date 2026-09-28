@@ -1,13 +1,13 @@
-# GLM-5.3-Flash on 4× ASUS GX10 (GB10), TP=4
+# GLM-5.3-Flash on ASUS GX10 (GB10): TP=4 on four boxes, TP=2 on two
 
 Need help? Join us on discord: https://discord.gg/M7XTrRJW3
 
-GLM-5.3-Flash (NVFP4) served by vLLM at TP=4 across four GB10 boxes over
-RoCE, with DFlash2 speculative decoding and a 524k context window. The base
+GLM-5.3-Flash (NVFP4) served by vLLM across four GB10 boxes at TP=4, or two at
+TP=2, over RoCE, with DFlash2 speculative decoding. The base
 is an unmodified vLLM nightly plus a handful of small patches and a newer FlashKDA.
 Ray is replaced by [mentat](https://github.com/mmastrac/mentat).
 
-Measured on four boxes, 2026-09-27 and 28, temperature 0,
+Measured 2026-09-27 and 28, temperature 0,
 nvidia/GLM-5.3-Flash-NVFP4, both ConnectX-7 PCIe roots in use, with every
 override in `experimental/compose/`: RDMA collectives, weight snapshots, FP8
 and NVFP4 dense layers, custom MoE and attention kernels, sequence parallel
@@ -15,21 +15,27 @@ prefill and a draft-length scheduler. They replace files inside the image
 this repo builds, and each one can be turned off.
 [experimental/README.md](experimental/README.md) has the details.
 
-| | |
-|---|---|
-| prefill @32k, cold | 4,946 tok/s |
-| prefill @128k, cold | 4,750 tok/s |
-| decode, code / prose / structured | 107.9 / 61.7 / 157.1 tok/s |
-| 1 / 2 / 4 / 8 / 16 streams, aggregate | 126 / 102 / 146 / 198 / 271 tok/s |
-| KV pool (26 GiB pin, fp8_e4m3) | 3.63M tokens |
-| requests decoding at once | 50 |
-| boot, once snapshots exist | ~3.5 min |
-| needle recall | 12/12 up to 507k tokens |
+| | TP=4, four boxes | TP=2, two boxes |
+|---|---|---|
+| prefill @32k, cold | 4,946 tok/s | 3,210 tok/s |
+| prefill @128k, cold | 4,750 tok/s | 3,015 tok/s |
+| decode, code / prose / structured | 107.9 / 61.7 / 157.1 tok/s | 58.0 / 35.0 / 79.3 tok/s |
+| code, 1 / 2 / 4 / 8 streams, aggregate | 127 / 148 / 196 / 242 tok/s | 69 / 80 / 105 / 94 tok/s |
+| KV pool (fp8_e4m3) | 3.63M tokens, 26 GiB pin | 260k tokens, 4 GiB pin |
+| longest request | 524k tokens | 160k tokens |
+| requests decoding at once | 50 | 3 |
+| boot, once snapshots exist | ~2 min | not measured yet |
+| needle recall | 12/12 up to 507k tokens | 6/6 up to 128k tokens |
 
 Prefill is first-touch on random words, so nothing is cached. Decode is
 [RigMark](https://github.com/alexellis/rigmark)'s single-stream decode,
-reasoning effort low, with its output gates passing 6/6. Streams each generate
-512 tokens from rotating code and prose prompts.
+reasoning effort low, with every output gate passing. Streams each generate
+512 tokens from a different code prompt (`gate/conc_workload.py`).
+
+TP=4 is the default. For two boxes, put `TP=2` in `compose/.env` on both, and
+the entrypoint picks the two-box KV pin, context length and request limit. Two
+boxes run with ~1 GiB of memory to spare, and only three requests' state fits
+in the smaller KV pool, so past three streams the rest wait.
 
 [model.yaml](model.yaml) has the checkpoints and the memory footprint, and
 [KNOBS.md](KNOBS.md) lists every environment variable the entrypoint reads.
@@ -38,20 +44,20 @@ here.
 
 ## What you need
 
-- **Four ASUS GX10 or other GB10 boxes** (sm_121a, 128 GB unified memory).
+- **Four ASUS GX10 or other GB10 boxes** (sm_121a, 128 GB unified memory), or two for TP=2.
   The model takes all of each box: ~91.9 GiB of GPU allocations per rank, with
   1.5-3 GiB left free (2026-09-23). Nothing else runs beside it.
 - **Each box running headless** (`multi-user.target`). These boxes ship with a
   GNOME desktop enabled, and a desktop session takes memory and GPU time from
   the model: `sudo systemctl set-default multi-user.target && sudo systemctl
   isolate multi-user.target`. The preflight warns while one is running.
-- **A ConnectX-7 fabric between all four**, through one switch (ours is a
+- **A ConnectX-7 fabric between them**, through one switch (ours is a
   MikroTik CRS812 at 200G), with RoCE working. Each box needs a static IPv4
   on its ConnectX interface, all in one subnet, MTU 9000. For full prefill
   speed also give the ConnectX-7's second PCIe root an address in a second
   subnet on every box (see `FABRIC_SUBNETS` in Tuning). mentatd tells the
   model which subnets these are (step 4).
-- **A LAN between all four** that your clients can reach. mentat identifies
+- **A LAN between them** that your clients can reach. mentat identifies
   each box by its LAN address, and the API is served on it.
 - **The weights on each box's local disk**, not on NFS: every rank reads the
   whole checkpoint, and an NFS mount races the network at boot.
@@ -137,7 +143,7 @@ should be 0.14.0 too.
 ## 3. Overrides in compose/.env (optional)
 
 `compose/.env` is optional. Each box reads its LAN address and fabric subnets
-from its own mentatd (step 4), the boxes elect a head once all four have
+from its own mentatd (step 4), the boxes elect a head once all of them have
 registered, and the paths and the image have defaults. Put a value in
 `compose/.env` only to override one. Compose reads `.env` from `compose/`,
 beside the compose file, whatever directory you run it from.
@@ -155,8 +161,8 @@ beside the compose file, whatever directory you run it from.
 | `FABRIC_SUBNETS` | one subnet per address mentatd tags `rdma` | mentatd tags no fabric address `rdma` |
 | `CLUSTER_SUBNET` | the first of `FABRIC_SUBNETS` | you set one subnet by hand, the older form of `FABRIC_SUBNETS` |
 
-With `HEAD_HOST` unset, the four boxes elect the one with the lowest LAN
-address as head, so with all four up it is always the same box. Each box logs
+With `HEAD_HOST` unset, the boxes elect the one with the lowest LAN address
+as head, so with all of them up it is always the same box. Each box logs
 one `election:` line naming the candidates, the head and its own role. Set
 `HEAD_HOST` on every box or on none: a box with a fixed head does not take
 part in the election. The weight snapshots under `CACHE_HOME` are per TP rank,
