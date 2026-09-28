@@ -35,45 +35,32 @@ MTP="${MTP:-1}"
 # silently replaces.
 SPEC_METHOD="${SPEC_METHOD:-dflash}"
 [[ "$MTP" == "0" ]] && SPEC_METHOD=none
-ROLE="${ROLE:-head}"
+# With neither ROLE nor HEAD_HOST set, the boxes elect a head once all TP
+# agents have registered (discover.sh). HEAD_HOST alone fixes the head, and
+# each box's role follows from whether it holds that address.
+. "$(dirname "$0")/discover.sh"
+_elect=""
+[[ -z "${ROLE:-}" && -z "${HEAD_HOST:-}" ]] && _elect=1
 MODEL="${MODEL_DIR:-/models/glm-5.3-flash-nvfp4}"
 SERVED="${SERVED_NAME:-glm53}"
 
 # --- cluster networking: everything rides the ConnectX link -----------------
-# Copied wholesale from ds4-flash because the constraint is the hardware, not
-# the model. No literal address appears here or in the compose file: each node
-# finds its own cluster IP by looking for the interface carrying CLUSTER_SUBNET.
-# The boxes are NOT symmetric (one carries its link on enp1s0f1np1, the rest
-# on enp1s0f0np0), so any hardcoded interface name is wrong somewhere whichever
-# you pick.
+# No literal address appears here or in the compose file. The boxes are NOT
+# symmetric (one carries its link on enp1s0f1np1, the rest on enp1s0f0np0), so
+# any hardcoded interface name is wrong somewhere whichever you pick.
+#
+# VLLM_HOST_IP is this node's LAN address: mentat identifies a node by it, and
+# the agent and daemon must agree on one string. Address prefixes
+# (CLUSTER_SUBNET, FABRIC_SUBNETS) name the fabric. Whatever .env leaves out
+# comes from the local mentatd: its lan-tagged address, and one prefix per
+# rdma-tagged address.
 #
 # An uncabled port powers down completely -- no PCI device, no
 # /sys/class/infiniband entry. That is not a missing driver and no amount of
 # modprobe fixes it, so a node reports only the ports it actually has.
-CLUSTER_SUBNET="${CLUSTER_SUBNET:?set CLUSTER_SUBNET to the fabric address prefix, with its trailing dot}"
-_cxip=$(ip -o -4 addr show 2>/dev/null | awk -v p="$CLUSTER_SUBNET" \
-        '$4 ~ "^"p {split($4,a,"/"); print a[1]; exit}')
-
-# The fabric is also absent while the switch reboots, and exiting then turns a
-# two-minute outage into a restart loop racing it: 60 restarts across one
-# firmware upgrade, none of which could have succeeded. Wait instead, so the
-# outage is a pause. FABRIC_WAIT_S bounds it; 0 waits forever.
-if [[ -z "${VLLM_HOST_IP:-}" ]]; then
-  _waited=0
-  while [[ -z "$_cxip" ]]; do
-    if (( ${FABRIC_WAIT_S:-0} > 0 && _waited >= ${FABRIC_WAIT_S:-0} )); then
-      echo "FATAL: no interface carries ${CLUSTER_SUBNET}0/24 after ${_waited}s" >&2
-      ip -br addr show >&2
-      exit 1
-    fi
-    (( _waited % 60 )) || echo "waiting for an interface on ${CLUSTER_SUBNET}0/24 (${_waited}s)"
-    sleep 10
-    _waited=$(( _waited + 10 ))
-    _cxip=$(ip -o -4 addr show 2>/dev/null | awk -v p="$CLUSTER_SUBNET" \
-            '$4 ~ "^"p {split($4,a,"/"); print a[1]; exit}')
-  done
-fi
-export VLLM_HOST_IP="${VLLM_HOST_IP:-$_cxip}"
+discover_network
+CLUSTER_SUBNET="${CLUSTER_SUBNET:-${FABRIC_SUBNETS%% *}}"
+export VLLM_HOST_IP
 
 # Gloo needs an EXACT interface name -- NCCL_SOCKET_IFNAME takes a prefix, this
 # does not. Left unset, Gloo binds 127.0.0.1 and the cluster fails silently at
@@ -322,23 +309,29 @@ export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:T
 # wedging. 0.92 is ~111.9 GiB against GPU_MEM_UTIL's ~107.
 export TORCH_MEM_FRACTION="${TORCH_MEM_FRACTION:-0.92}"
 
-RAY_ADDRESS="${RAY_ADDRESS:-${HEAD_HOST:?set HEAD_HOST to the head node address}:6379}"
-export RAY_ADDRESS
+if [[ -n "$_elect" ]]; then
+  # Every box registers with its own daemon. The daemon relays to mentat's
+  # head, and every group lives on the head.
+  RAY_ADDRESS="${RAY_ADDRESS:-127.0.0.1:6379}"
+  export RAY_ADDRESS
+else
+  RAY_ADDRESS="${RAY_ADDRESS:-${HEAD_HOST:?set HEAD_HOST to the head node address}:6379}"
+  export RAY_ADDRESS
 
-# One head per group. A worker left at ROLE=head (the value .env.example ships)
-# starts a second driver: mentat refuses it ("group ... already has an active
-# driver session"), the container restarts forever, and the real head waits
-# for GPUs that never join. Catch the mismatch here and say which setting.
-case "$ROLE" in head|worker) ;; *) echo "FATAL: ROLE=$ROLE; set it to head or worker in .env" >&2; exit 1;; esac
-_head_ip="$(getent ahostsv4 "$HEAD_HOST" 2>/dev/null | awk 'NR==1 {print $1}')"
-_head_ip="${_head_ip:-$HEAD_HOST}"
-if [[ "$ROLE" == "head" && "$VLLM_HOST_IP" != "$_head_ip" ]]; then
-  echo "FATAL: ROLE=head, but VLLM_HOST_IP=$VLLM_HOST_IP is not HEAD_HOST=$HEAD_HOST ($_head_ip). Set ROLE=worker in .env on every node except the head." >&2
-  exit 1
-fi
-if [[ "$ROLE" == "worker" && "$VLLM_HOST_IP" == "$_head_ip" ]]; then
-  echo "FATAL: ROLE=worker, but VLLM_HOST_IP=$VLLM_HOST_IP is HEAD_HOST. Set ROLE=head in .env on this node." >&2
-  exit 1
+  # One head per group. A worker left at ROLE=head starts a second driver:
+  # mentat refuses it ("group ... already has an active driver session"), the
+  # container restarts forever, and the real head waits for GPUs that never
+  # join. Catch the mismatch here and say which setting.
+  fixed_role
+  case "$ROLE" in head|worker) ;; *) echo "FATAL: ROLE=$ROLE; set it to head or worker in .env" >&2; exit 1;; esac
+  if [[ "$ROLE" == "head" && "$VLLM_HOST_IP" != "$_head_ip" ]]; then
+    echo "FATAL: ROLE=head, but VLLM_HOST_IP=$VLLM_HOST_IP is not HEAD_HOST=$HEAD_HOST ($_head_ip). Set ROLE=worker in .env on every node except the head." >&2
+    exit 1
+  fi
+  if [[ "$ROLE" == "worker" && "$VLLM_HOST_IP" == "$_head_ip" ]]; then
+    echo "FATAL: ROLE=worker, but VLLM_HOST_IP=$VLLM_HOST_IP is HEAD_HOST. Set ROLE=head in .env on this node." >&2
+    exit 1
+  fi
 fi
 
 # mentat (the Ray replacement in this image) rendezvouses subclusters by
@@ -501,6 +494,7 @@ export STAGE_FILE="${STAGE_FILE:-/tmp/glm53-stage}"
 stage() { echo "$1" >> "$STAGE_FILE"; echo "== stage: $1 =="; }
 STATUS_PORT="${STATUS_PORT:-8082}" PORT="${API_PORT:-8002}" \
   python3 /usr/local/bin/status-server.py &
+_status_pid=$!
 stage starting
 
 if [[ ! -f "$MODEL/config.json" ]]; then
@@ -510,7 +504,8 @@ if [[ ! -f "$MODEL/config.json" ]]; then
 fi
 
 if [[ -d "${MCP_LOG_DIR:-/logs}" && -w "${MCP_LOG_DIR:-/logs}" ]]; then
-  _log="${MCP_LOG_DIR:-/logs}/vllm-${ROLE}.log"
+  # An elected box has no role yet, and its role can change between boots.
+  _log="${MCP_LOG_DIR:-/logs}/vllm${ROLE:+-$ROLE}.log"
   [[ -f "$_log" ]] && mv -f "$_log" "${_log%.log}.prev.log" 2>/dev/null || true
   echo "logging to $_log"
   exec > >(tee "$_log") 2>&1
@@ -569,6 +564,30 @@ export RAY_memory_monitor_refresh_ms="${RAY_MEMORY_MONITOR_REFRESH_MS:-0}"
 # announces, so a router on the LAN and one on the fabric both reach it. A URL
 # pins one address, reachable only from that link. Both servers bind 0.0.0.0.
 export MENTAT_MCP_API="${MENTAT_MCP_API:-${STATUS_PORT:-8082}/mcp}"
+
+# --- head election ------------------------------------------------------------
+# Each box starts its agent first, with no OpenAI endpoint since the role is
+# not known yet, and then elects a head from the group's live agents
+# (discover.sh). The agent stays in the background: the head announces the
+# endpoint through `python -m ray.register` below, and a worker waits on it.
+_agent_pid=""
+if [[ -n "$_elect" ]]; then
+  stage joining
+  env -u MENTAT_OPENAI_API -u MENTAT_MODEL_PROVIDER \
+    ray start --block --address="$RAY_ADDRESS" \
+              --object-store-memory="$RAY_OBJECT_STORE_MEMORY" &
+  _agent_pid=$!
+  elect_head
+  # The status server read ROLE once, before there was one, and took the
+  # head's stages. A worker restarts it so its page reads as a worker's.
+  if [[ "$ROLE" == "worker" ]]; then
+    kill "$_status_pid" 2>/dev/null || true
+    wait "$_status_pid" 2>/dev/null || true
+    STATUS_PORT="${STATUS_PORT:-8082}" PORT="${API_PORT:-8002}" \
+      python3 /usr/local/bin/status-server.py &
+  fi
+fi
+
 if [[ "$ROLE" == "worker" ]]; then
   unset MENTAT_OPENAI_API
 else
@@ -598,6 +617,12 @@ if [[ "$ROLE" == "worker" ]]; then
       fi
       sleep 5
     done ) &
+  # An elected worker's agent is already running. Wait on it as exec would:
+  # the container exits when the agent does.
+  if [[ -n "$_agent_pid" ]]; then
+    wait "$_agent_pid"
+    exit
+  fi
   exec ray start --block --address="$RAY_ADDRESS" \
             --object-store-memory="$RAY_OBJECT_STORE_MEMORY"
 fi
@@ -609,8 +634,17 @@ fi
 # group and its driver must reach one daemon, and 0.6.0 let the two disagree
 # silently. On the head RAY_ADDRESS is its own daemon, so this changes nothing
 # about where it registers -- it only stops mentat having to guess.
-ray start --head --address="$RAY_ADDRESS" --node-ip-address="$VLLM_HOST_IP" --port=6379 \
-          --object-store-memory="$RAY_OBJECT_STORE_MEMORY"
+#
+# An elected head's agent started before the election and announced only the
+# MCP endpoint. `python -m ray.register` adds the OpenAI endpoint under a
+# second agent id, since two registrations with one id replace each other.
+if [[ -n "$_agent_pid" ]]; then
+  python3 -m ray.register --address="$RAY_ADDRESS" \
+    --container="${CONTAINER_NAME:-glm53}-api" --mcp= &
+else
+  ray start --head --address="$RAY_ADDRESS" --node-ip-address="$VLLM_HOST_IP" --port=6379 \
+            --object-store-memory="$RAY_OBJECT_STORE_MEMORY"
+fi
 
 # Starting the engine without its workers reaches NCCL and dies there
 # ("invalid usage"), so this waits rather than giving up and proceeding. The

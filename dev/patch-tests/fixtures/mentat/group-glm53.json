@@ -1,0 +1,151 @@
+{
+  "control_port": 6379,
+  "groups": {
+    "glm53": {
+      "agents": {
+        "glm53@glm53@": {
+          "alive": true,
+          "container": "glm53",
+          "degraded": false,
+          "gone_since_ms": null,
+          "gpus_free": [],
+          "machine": {
+            "cpus": 20,
+            "gpus": [
+              {
+                "index": 0,
+                "memory": 130596028416,
+                "name": "NVIDIA GB10",
+                "uma": true,
+                "vendor": "nvidia"
+              }
+            ],
+            "memory": 130596028416
+          },
+          "node_id": "6d656e7461743a3139322e302e322e39330000000000000000000000",
+          "node_ip": "192.0.2.93",
+          "pid": 2315,
+          "services": {
+            "mcp": {
+              "host": "",
+              "note": "",
+              "path": "/mcp",
+              "port": 8082,
+              "provider": ""
+            },
+            "openai": {
+              "host": "",
+              "note": "",
+              "path": "/v1",
+              "port": 8002,
+              "provider": "vllm"
+            }
+          }
+        },
+        "glm53@glm53@192.0.2.36": {
+          "alive": true,
+          "container": "glm53",
+          "degraded": false,
+          "gone_since_ms": null,
+          "gpus_free": [],
+          "machine": {
+            "cpus": 20,
+            "gpus": [
+              {
+                "index": 0,
+                "memory": 130596028416,
+                "name": "NVIDIA GB10",
+                "uma": true,
+                "vendor": "nvidia"
+              }
+            ],
+            "memory": 130596028416
+          },
+          "node_id": "6d656e7461743a3139322e302e322e33360000000000000000000000",
+          "node_ip": "192.0.2.36",
+          "pid": 1,
+          "services": {
+            "mcp": {
+              "host": "",
+              "note": "",
+              "path": "/mcp",
+              "port": 8082,
+              "provider": ""
+            }
+          }
+        },
+        "glm53@glm53@192.0.2.70": {
+          "alive": true,
+          "container": "glm53",
+          "degraded": false,
+          "gone_since_ms": null,
+          "gpus_free": [],
+          "machine": {
+            "cpus": 20,
+            "gpus": [
+              {
+                "index": 0,
+                "memory": 130596188160,
+                "name": "NVIDIA GB10",
+                "uma": true,
+                "vendor": "nvidia"
+              }
+            ],
+            "memory": 130596188160
+          },
+          "node_id": "6d656e7461743a3139322e302e322e37300000000000000000000000",
+          "node_ip": "192.0.2.70",
+          "pid": 1,
+          "services": {
+            "mcp": {
+              "host": "",
+              "note": "",
+              "path": "/mcp",
+              "port": 8082,
+              "provider": ""
+            }
+          }
+        },
+        "glm53@glm53@192.0.2.77": {
+          "alive": true,
+          "container": "glm53",
+          "degraded": false,
+          "gone_since_ms": null,
+          "gpus_free": [],
+          "machine": {
+            "cpus": 20,
+            "gpus": [
+              {
+                "index": 0,
+                "memory": 130596028416,
+                "name": "NVIDIA GB10",
+                "uma": true,
+                "vendor": "nvidia"
+              }
+            ],
+            "memory": 130596028416
+          },
+          "node_id": "6d656e7461743a3139322e302e322e37370000000000000000000000",
+          "node_ip": "192.0.2.77",
+          "pid": 1,
+          "services": {
+            "mcp": {
+              "host": "",
+              "note": "",
+              "path": "/mcp",
+              "port": 8082,
+              "provider": ""
+            }
+          }
+        }
+      },
+      "gpus_total": 4,
+      "gpus_used": 4
+    }
+  },
+  "head_generation": 1,
+  "head_node_id": "6d656e7461743a3139322e302e322e31323200000000000000000000",
+  "node_id": "6d656e7461743a3139322e302e322e31323200000000000000000000",
+  "node_ip": "192.0.2.122",
+  "proto": "0.99"
+}

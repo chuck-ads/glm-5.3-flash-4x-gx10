@@ -8,8 +8,8 @@ FlashInfer files, so they only match that image.
 
 Requirements: the image built from this tree (`image/build.sh`) and the normal four-node setup from the main README (the same `compose/glm53.yaml` and a per-node `compose/.env` on every box). The overrides replace files inside that image, so they do not apply to other images.
 
-1. In each node's `compose/.env`, set `FABRIC_SUBNETS` to both ConnectX subnets, one per PCIe root (see `.env.example`). The entrypoint derives `NCCL_IB_HCA` and `NCCL_IB_GID_INDEX` from it, and arx and arxbig use the same two devices; each rank's log shows them (`arx all-reduce: rank r/4 on [dev0, dev1]`). With only one device they log a warning and fall back to NCCL.
-2. Start the stack with every override, on every node (head first, as usual). Order matters: later files win.
+1. Put both ConnectX PCIe roots on the fabric: tag both interfaces `rdma` in mentatd's `MENTAT_ANNOUNCE_IFACES` (main README, step 4), or set `FABRIC_SUBNETS` to both subnets in each node's `compose/.env`. The entrypoint derives `NCCL_IB_HCA` and `NCCL_IB_GID_INDEX` from it, and arx and arxbig use the same two devices. Each rank's log shows them (`arx all-reduce: rank r/4 on [dev0, dev1]`). With only one device they log a warning and fall back to NCCL.
+2. Start the stack with every override, on every node. Order matters: later files win.
 
    ```
    docker compose -f compose/glm53.yaml \
@@ -19,7 +19,7 @@ Requirements: the image built from this tree (`image/build.sh`) and the normal f
      -f experimental/compose/sp.yaml up -d
    ```
 
-3. The first boot loads the checkpoint normally (~8 min), compiles the CUDA extensions, and writes a processed-weight snapshot per rank under `CACHE_HOME/weight-snapshots` (~48 GB per node). Later boots restore it (~3.5 min).
+3. The first boot loads the checkpoint normally (~8 min), compiles the CUDA extensions, and writes a processed-weight snapshot per rank under `weight-snapshots` in the cache mount (`CACHE_HOME`, or the `glm53_cache` volume), ~48 GB per node. Later boots restore it (~3.5 min).
 4. Check: `bash smoketest/run.sh http://<head>:8002` should pass 8/8, and each rank's log should show `arx all-reduce: rank r/4` and `arxbig all-gather: rank r/4`.
 
 ### Turning pieces off

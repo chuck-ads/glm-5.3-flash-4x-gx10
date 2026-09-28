@@ -64,6 +64,7 @@ def facts() -> tuple[dict, dict]:
         "nccl": ".".join(map(str, torch.cuda.nccl.version())),
         "driver": driver,
         "entrypoint": sha("/entrypoint.sh"),
+        "discover": sha("/discover.sh"),
         "model config": sha(f"{model}/config.json"),
         "chat template": sha(os.environ.get("CHAT_TEMPLATE") or "/usr/local/share/glm53-chat-template.jinja"),
         "fabric devices": str(len([d for d in os.environ.get("NCCL_IB_HCA", "").split(",") if d])),

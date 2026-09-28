@@ -195,7 +195,7 @@ RUN python3 /tmp/verify-base.py && rm /tmp/verify-base.py
 
 COPY image/chat-template.jinja /usr/local/share/glm53-chat-template.jinja
 COPY vllm/status-server.py image/self-test.py image/fabric-check.py /usr/local/bin/
-COPY image/entrypoint.sh /entrypoint.sh
+COPY image/entrypoint.sh image/discover.sh /
 RUN chmod +x /usr/local/bin/status-server.py /usr/local/bin/self-test.py /usr/local/bin/fabric-check.py /entrypoint.sh
 
 # 8002 = OpenAI API, 8082 = startup status page, bound from container start

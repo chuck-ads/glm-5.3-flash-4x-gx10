@@ -1,9 +1,11 @@
 # GLM-5.3-Flash NVFP4, TP=4 across four GB10 nodes (one head, three workers),
 # with the DFlash2 drafter.
 #
-# Run the SAME file on every node; only compose/.env differs (see .env.example):
+# Run the SAME file on every node:
 #   docker compose -f compose/glm53.yaml up -d
-# Compose reads .env from this file's directory, not the working directory.
+# compose/.env is optional. Addresses and roles come from mentat, and paths
+# and the image have defaults (.env.example lists the overrides). Compose
+# reads .env from this file's directory, whatever the working directory.
 #
 # Ordering: from cold, any rank may start first -- registration retries
 # forever, and the host-level mentatd (mentatd.yaml from
@@ -14,7 +16,8 @@
 # of 121.6 GiB, so stop any other model on these boxes first.
 #
 # network_mode: host is required -- RoCE/NCCL needs the real interfaces, and
-# Ray's actor ports are not practically mappable.
+# Ray's actor ports are not practically mappable. It is also how the
+# container reaches the box's mentatd, on 127.0.0.1:6379 and :6380.
 #
 # Pinned so the project is not named after this directory ("compose"). Before
 # the first `up`, take down a stack started under another project name: this
@@ -22,9 +25,9 @@
 name: glm53
 services:
   glm53:
-    # No default: compose from this tree needs an image whose entrypoint carries
-    # the same defaults, and an older tag would boot silently mistuned.
-    image: ${IMAGE:?set IMAGE in .env}
+    # image/build.sh's default tag. Keep the two in step: the entrypoint's
+    # defaults live in the image, and an older tag boots silently mistuned.
+    image: ${IMAGE:-spark-glm53:v9}
     container_name: glm53
     network_mode: host
     ipc: host
@@ -47,7 +50,7 @@ services:
       # Local rather than NFS on purpose -- an NFS mount races the network at
       # boot and fails (seen on one node on 2026-08-26), and a model that only
       # starts when the NAS is awake will eventually fail to start.
-      - ${MODEL_HOST_DIR:?set MODEL_HOST_DIR in .env}:/models/glm-5.3-flash-nvfp4:ro
+      - ${MODEL_HOST_DIR:-/srv/models/glm-5.3-flash-nvfp4}:/models/glm-5.3-flash-nvfp4:ro
       # The host's list of running systemd units, read by the preflight to warn
       # about a desktop session (README, "What you need").
       - /run/systemd/units:/host/systemd-units:ro
@@ -55,17 +58,17 @@ services:
       # rank. A separate Qwen3-based model that reads auxiliary hidden states
       # from target layers 5, 14, 24, 33 and 42 (image/patches/glm53_eagle3_aux.py
       # supplies them; upstream GLM5next does not).
-      - ${DFLASH_HOST_DIR:?set DFLASH_HOST_DIR in .env}:/models/glm-5.3-flash-dflash2:ro
-      # LibertAI's sparse-MLA kernel, built for sm_121a. Two
-      # vllm.general_plugins entry points, both inert unless their env var is
-      # set, so mounting it changes nothing on its own.
-      - ${EXT_DIR:?set EXT_DIR in .env}:/opt/ext:ro
-      # JIT caches (FlashInfer, torch.compile, Triton, TileLang). WITHOUT this
-      # they live inside the container and are discarded on every `compose
-      # down`, so each restart recompiles. The FlashInfer autotune cache is the
+      - ${DFLASH_HOST_DIR:-/srv/models/glm-5.3-flash-dflash2}:/models/glm-5.3-flash-dflash2:ro
+      # JIT caches (FlashInfer, torch.compile, Triton, TileLang), and the
+      # experimental weight snapshots (~48 GB a node). WITHOUT this they live
+      # inside the container and are discarded on every `compose down`, so
+      # each restart recompiles. The FlashInfer autotune cache is the
       # exception: at TP>1 the entrypoint keeps it in /tmp and wipes it.
-      - ${CACHE_HOME:?set CACHE_HOME in .env}:/root/.cache
-      - ${LOG_DIR:?set LOG_DIR in .env}:/logs
+      # Unset, a named volume. `down -v` deletes it.
+      - ${CACHE_HOME:-cache}:/root/.cache
+      # The engine log and the allocator counters behind /memory, read through
+      # the status server's MCP tools. Unset, a named volume.
+      - ${LOG_DIR:-logs}:/logs
     # RULE: any knob that also has a default in entrypoint.sh is left EMPTY
     # here. A default in both places means two places to change and one
     # silently winning -- which happened repeatedly on 2026-08-27, with the
@@ -75,7 +78,22 @@ services:
     # PEERS, MCP_LOG_DIR, THROUGHPUT_INTERVAL_S). Its own defaults are
     # generic, not this model's, so they are set here explicitly.
     environment:
-      - ROLE=${ROLE:?set ROLE to head or worker in .env}
+      # Passed through only when .env (or the shell running compose) sets
+      # them. Unset, the entrypoint takes them from the box's mentatd.
+      #
+      # ROLE and HEAD_HOST, both unset: the boxes elect the live agent with
+      # the lowest address as head. Set, the roles are fixed: ROLE is head on
+      # one box and worker on the rest, and HEAD_HOST is the head's LAN
+      # address on every box, the head included.
+      - ROLE
+      - HEAD_HOST
+      # This node's LAN address. mentat identifies a node by it, and the agent
+      # and daemon must agree on one string. Unset = the address mentatd tags
+      # lan.
+      - VLLM_HOST_IP
+      # Address prefix of the fabric, with its trailing dot. Unset = the first
+      # of FABRIC_SUBNETS.
+      - CLUSTER_SUBNET
       # The status server reads these two itself, and its default name is
       # "vllm", so they carry a default here too.
       - SERVICE_NAME=${SERVICE_NAME:-glm53}
@@ -84,20 +102,13 @@ services:
       # default). Set it only to run the same model as a second parallel
       # stack, which needs a distinct group per stack.
       - MENTAT_GROUP=${MENTAT_GROUP:-}
-      # This node's LAN address. mentat identifies a node by the address its
-      # daemon connected from, and the agent and daemon must agree on one
-      # string, so this is the LAN address and not the fabric one the
-      # entrypoint would otherwise derive from CLUSTER_SUBNET.
-      - VLLM_HOST_IP=${VLLM_HOST_IP:?set VLLM_HOST_IP to this node's LAN address in .env}
-      # Empty = HEAD_HOST:6379.
+      # Empty = 127.0.0.1:6379 when the boxes elect a head, else HEAD_HOST:6379.
       - RAY_ADDRESS=${RAY_ADDRESS:-}
-      # Address prefix of the fabric, with its trailing dot. Finds the Gloo and
-      # NCCL bootstrap interface, and is the fabric when FABRIC_SUBNETS is empty.
-      - CLUSTER_SUBNET=${CLUSTER_SUBNET:?set CLUSTER_SUBNET in .env}
       # One subnet per ConnectX PCIe root NCCL should use, space-separated. Each
       # names an interface; the entrypoint maps it to its RDMA device and GID.
       # Both roots made a 126k prefill 11% faster on TP=4 (2026-09-26). Empty =
-      # CLUSTER_SUBNET only, one root.
+      # CLUSTER_SUBNET when that is set, else one subnet per address mentatd
+      # tags rdma.
       - FABRIC_SUBNETS=${FABRIC_SUBNETS:-}
       # How long to wait for the fabric and for the peer's GPUs before giving
       # up. Both default to waiting forever, because the usual reason either is
@@ -110,9 +121,6 @@ services:
       # broken: this one is deliberately bounded, and the container exits so
       # the failure is visible rather than a container that waits forever.
       - ROCE_SETTLE_S=${ROCE_SETTLE_S:-}
-      # The head's address, which every rank's mentat agent dials. Set it on
-      # the head too.
-      - HEAD_HOST=${HEAD_HOST:?set HEAD_HOST to the head node's address in .env}
       # LEFT EMPTY ON PURPOSE so the entrypoint derives it at start. There is
       # no correct constant: the GID table is indexed by (address, RoCE version)
       # with first-free allocation, so the index differs per node AND per boot.
@@ -155,17 +163,6 @@ services:
       # Which NVFP4 MoE kernel: flashinfer_cutlass (entrypoint default) or
       # marlin. The entrypoint has the history.
       - MOE_BACKEND=${MOE_BACKEND:-}
-      # The plugin's own sparse-MLA backend, replacing the SM90+FA2 route the
-      # MiaAI patcher gates on. Its kernel is sized for sm_120/121's 101,376 B
-      # of shared memory and measures 0.999998 against reference, where the
-      # kernel it replaces measures 3.8e-3.
-      - PYTHONPATH=${PYTHONPATH:-/opt/ext}
-      - VLLM_GLM53_CUDA_SPARSE_MLA=${VLLM_GLM53_CUDA_SPARSE_MLA:-}
-      # Deliberately NOT set: the plugin's MoE hook. It supplies a single
-      # constant activation scale, and 1.0 underflows any 16-element block
-      # whose amax is below 0.1 -- LibertAI retracted that fix themselves. This
-      # checkpoint carries real per-projection scales.
-      # - VLLM_GLM53_MOE_INPUT_SCALE
       # 0.88 is the measured ceiling under mentat (2026-08-27): CUDA-visible
       # free memory on the head is 108.0 GiB regardless of page cache, 0.90
       # wants 109.46 and failed the startup check four times, 0.88 wants
@@ -261,3 +258,8 @@ services:
               count: all
               capabilities: [gpu]
     restart: unless-stopped
+
+# Used only when CACHE_HOME or LOG_DIR is unset.
+volumes:
+  cache:
+  logs:

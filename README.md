@@ -47,22 +47,27 @@ here.
   isolate multi-user.target`. The preflight warns while one is running.
 - **A ConnectX-7 fabric between all four**, through one switch (ours is a
   MikroTik CRS812 at 200G), with RoCE working. Each box needs a static IPv4
-  on its ConnectX interface, all in one subnet (`CLUSTER_SUBNET`), MTU 9000.
-  For full prefill speed also give the ConnectX-7's second PCIe root an
-  address in a second subnet on every box (`FABRIC_SUBNETS`, see Tuning).
+  on its ConnectX interface, all in one subnet, MTU 9000. For full prefill
+  speed also give the ConnectX-7's second PCIe root an address in a second
+  subnet on every box (see `FABRIC_SUBNETS` in Tuning). mentatd tells the
+  model which subnets these are (step 4).
 - **A LAN between all four** that your clients can reach. mentat identifies
   each box by its LAN address, and the API is served on it.
 - **The weights on each box's local disk**, not on NFS: every rank reads the
   whole checkpoint, and an NFS mount races the network at boot.
   - [nvidia/GLM-5.3-Flash-NVFP4](https://huggingface.co/nvidia/GLM-5.3-Flash-NVFP4),
-    181 GiB, at `MODEL_HOST_DIR`
+    181 GiB, at `/srv/models/glm-5.3-flash-nvfp4` (`MODEL_HOST_DIR`)
   - [incoai/GLM-5.3-Flash-DFlash2](https://huggingface.co/incoai/GLM-5.3-Flash-DFlash2),
-    the drafter, 2.2 GiB, at `DFLASH_HOST_DIR`. It is licensed CC BY-NC-ND
+    the drafter, 2.2 GiB, at `/srv/models/glm-5.3-flash-dflash2`
+    (`DFLASH_HOST_DIR`). It is licensed CC BY-NC-ND
     4.0, non-commercial; check that before you serve it. `SPEC_METHOD=mtp`
     uses the checkpoint's own MTP head instead, slower but with no second
     download.
 
-  `hf download` is resumable.
+  `hf download` is resumable:
+
+      hf download nvidia/GLM-5.3-Flash-NVFP4 --local-dir /srv/models/glm-5.3-flash-nvfp4
+      hf download incoai/GLM-5.3-Flash-DFlash2 --local-dir /srv/models/glm-5.3-flash-dflash2
 - **Docker with the NVIDIA container runtime and Compose v2** on every box,
   and `/dev/infiniband` present on the host.
 
@@ -71,7 +76,7 @@ here.
 | port | what | where |
 |---|---|---|
 | 6379, 6380 | mentatd control and HTTP | every box |
-| 6381 | mentatd-serve: the OpenAI API and merged MCP for clients | one box, the head by default |
+| 6381 | mentatd-serve: the OpenAI API and merged MCP for clients | one box |
 | 6382/udp | mentatd announcements | every box |
 | 8002 | vLLM's OpenAI API (`/v1/chat/completions`, `/v1/models`, `/metrics`) | head only |
 | 8082 | status page and MCP (`/mcp`) | every box |
@@ -89,7 +94,7 @@ that holds cluster membership.
 |---|---|
 | `image/` | Dockerfile, entrypoint, patches, `verify-base.py`, `self-test.py`, chat template, `build.sh` |
 | `compose/glm53.yaml` | the model, the same file on every box |
-| `.env.example` | per-host and per-box values; copy to `compose/.env` |
+| `.env.example` | optional overrides for `compose/.env` |
 | `smoketest/` | `run.sh <base> [served-name]` |
 | `.submodules/spark-agent` | the status server, reached through the `vllm` symlink |
 | `dev/` | not in the image: the corruption diagnosis and repros, kernel and patch tests, the step tap |
@@ -129,59 +134,79 @@ FlashKDA (see Patches), in a builder stage that took 98 s on a GX10.
 0.14.0, which refuses daemons older than 0.9, so `mentatd` and `mentatd-serve`
 should be 0.14.0 too.
 
-## 3. Fill in compose/.env
+## 3. Overrides in compose/.env (optional)
 
-On every box:
+`compose/.env` is optional. Each box reads its LAN address and fabric subnets
+from its own mentatd (step 4), the boxes elect a head once all four have
+registered, and the paths and the image have defaults. Put a value in
+`compose/.env` only to override one. Compose reads `.env` from `compose/`,
+beside the compose file, whatever directory you run it from.
+`.env.example` lists the usual overrides.
 
-    cp .env.example compose/.env
+| variable | unset | set it when |
+|---|---|---|
+| `IMAGE` | `image/build.sh`'s default tag | you built under another tag |
+| `MODEL_HOST_DIR` | `/srv/models/glm-5.3-flash-nvfp4` | the checkpoint is elsewhere on this box |
+| `DFLASH_HOST_DIR` | `/srv/models/glm-5.3-flash-dflash2` | the drafter is elsewhere on this box |
+| `CACHE_HOME`, `LOG_DIR` | the volumes `glm53_cache` and `glm53_logs` | you want the JIT caches or the logs in a host directory |
+| `HEAD_HOST` | elected: the box with the lowest LAN address | you want a fixed head: its LAN address, the same on every box. Each box then works out its own role |
+| `ROLE` | from `HEAD_HOST` | never, unless you set it on every box: `head` on one, `worker` on the rest |
+| `VLLM_HOST_IP` | the address mentatd tags `lan` | mentatd tags nothing `lan` on this box |
+| `FABRIC_SUBNETS` | one subnet per address mentatd tags `rdma` | mentatd tags no fabric address `rdma` |
+| `CLUSTER_SUBNET` | the first of `FABRIC_SUBNETS` | you set one subnet by hand, the older form of `FABRIC_SUBNETS` |
 
-Compose reads `.env` from `compose/`, beside the compose file, not from the
-directory you run it in.
+With `HEAD_HOST` unset, the four boxes elect the one with the lowest LAN
+address as head, so with all four up it is always the same box. Each box logs
+one `election:` line naming the candidates, the head and its own role. Set
+`HEAD_HOST` on every box or on none: a box with a fixed head does not take
+part in the election. The weight snapshots under `CACHE_HOME` are per TP rank,
+so moving the head reshuffles the ranks, and the first boot after that loads
+the checkpoint in full and writes new snapshots.
 
-| variable | value |
-|---|---|
-| `IMAGE` | the tag you built |
-| `HEAD_HOST` | the head's LAN address, the same on every box, the head included |
-| `CLUSTER_SUBNET` | the fabric subnet prefix with its trailing dot, e.g. `10.0.0.` |
-| `MODEL_HOST_DIR`, `DFLASH_HOST_DIR` | where the checkpoint and drafter are on this box |
-| `EXT_DIR` | any directory; see below |
-| `CACHE_HOME`, `LOG_DIR` | writable directories for JIT caches and logs |
-| `ROLE` | `head` on one box, `worker` on the other three |
-| `VLLM_HOST_IP` | **this** box's LAN address |
+Leave every tuned knob out: each has its default in `image/entrypoint.sh`, and
+a copy in `.env` silently wins over the measured value.
 
-Only `ROLE` and `VLLM_HOST_IP` differ between boxes. Leave every tuned knob
-out: each has its default in `image/entrypoint.sh`, and a copy in `.env`
-silently wins over the measured value.
+The volumes survive `docker compose down` and go with `down -v`. The engine
+log is `/logs/vllm.log` inside the container (`vllm-head.log` or
+`vllm-worker.log` when `ROLE` is set), readable through the status page's MCP
+tools or `docker exec glm53 tail /logs/vllm.log`.
 
-`EXT_DIR` is mounted at `/opt/ext` for LibertAI's sparse-MLA kernel plugin,
-which is used only when `VLLM_GLM53_CUDA_SPARSE_MLA` is set. This recipe does
-not set it and serves on the MiaAI path (see Patches), so an empty directory
-is fine.
-
-## 4. Start mentatd, and mentatd-serve on the head
+## 4. Start mentatd, and mentatd-serve on one box
 
 mentat has its own repo, compose files and `.env`. On every box, in a
 checkout of [mmastrac/mentat](https://github.com/mmastrac/mentat) at `v0.14.0`:
 
     VERSION=0.14.0 ./build.sh
-    echo "MENTAT_PEERS=<head LAN address>:6379" > .env
+    cat > .env <<'EOF'
+    MENTAT_PEERS=<another box's LAN address>:6379
+    MENTAT_ANNOUNCE_IFACES=en*f*np*=connectx+rdma,en*=lan
+    EOF
+    docker compose -f mentatd.yaml up -d
 
 Or skip the build and add `IMAGE=mmastrac/mentatd:0.14.0` to that `.env`
 (`mmastrac/mentatd-serve:0.14.0` for the router): the published images cover
 arm64.
-    docker compose -f mentatd.yaml up -d
+
+The model reads its networking from `MENTAT_ANNOUNCE_IFACES`. Tag the LAN
+interface `lan` and every ConnectX interface that holds a fabric address
+`rdma`. The line above does both on a GX10: `en*f*np*` matches both PCIe
+roots (`enp1s0f0np0` and `enP2p1s0f0np0`, or their `f1` twins). A pattern that
+misses the second root, such as `enp1s0f*np*`, leaves NCCL on one root, and
+the preflight warns about it. To check a box:
+
+    curl -s localhost:6380/status | jq .addr_tags
 
 The daemon names the box by its default route's address, which must be the
-`VLLM_HOST_IP` you gave the model. Set `MENTAT_NODE_IP` in mentat's `.env`
-when it is not. The model container registers with the head's daemon at
-`HEAD_HOST:6379`, not its own box's (see "Boot hangs at `waiting for 4 GPUs,
-have 1`"). Then, on the head only:
+LAN address. Set `MENTAT_NODE_IP` in mentat's `.env` when it is not. The
+model container registers with the daemon on its own box
+(`127.0.0.1:6379`). That daemon passes the registration on to the daemon
+mentat elected as its head. With `HEAD_HOST` set, the container registers
+with the daemon at `HEAD_HOST:6379` instead. Then, on one box:
 
     docker compose -f mentatd-serve.yaml up -d
 
-mentat's `mentatd.yaml` explains the optional settings: interface ranking and
-fabric tags (`MENTAT_ANNOUNCE_IFACES`), and signing announcements
-(`MENTAT_SECRET`, which must then be set on every box).
+mentat's `mentatd.yaml` explains the other settings, such as signing
+announcements (`MENTAT_SECRET`, which must then be set on every box).
 
 ## 5. Start the model
 
@@ -200,12 +225,12 @@ group then hangs just past NCCL setup: every rank `running`, restart count 0,
 CPU ~1%, no weights loading, and nothing in any log after the
 `custom_all_reduce` warning. Seen on 2026-09-10 after several rapid recreate
 cycles. Take every rank down, confirm all four containers are gone, then start
-the head and the workers a few seconds later:
+them again a few seconds later:
 
     # on each box
     docker compose -f compose/glm53.yaml down --timeout 60
     # confirm on all four: docker ps -a | grep glm53  ->  nothing
-    # then the head first, the workers after
+    # then up again; with fixed roles, the head first
 
 The project name is pinned to `glm53`. A stack started under another project
 name (an older checkout run from a different directory, say) must be taken
@@ -214,7 +239,7 @@ name.
 
 ## 6. Check it
 
-    smoketest/run.sh http://<head>:6381
+    smoketest/run.sh http://<mentatd-serve box>:6381
 
 Eight cases, each with an answer that can be checked, because this model can
 load cleanly, report healthy and serve fluent nonsense. The first fails
@@ -287,16 +312,16 @@ needs that agent or plain ssh.
 
 The bias throughout is that **a long prefill must never block a short request**,
 and that a single stream should be fast, rather than maximising aggregate
-throughput at concurrency. Every value below is the entrypoint's default,
-except `FABRIC_SUBNETS`, which you set in `.env`, and `busy_loop_s`, which a
-patch bakes into the image.
+throughput at concurrency. Every value below is the entrypoint's default.
+`FABRIC_SUBNETS` comes from mentatd's tags, and a patch bakes `busy_loop_s`
+into the image.
 
 | knob | value | why |
 |---|---|---|
 | `LONG_PREFILL_TOKEN_THRESHOLD` | 2304 | Caps one prefill's share of each scheduler step. Left at the default (budget − 256) a 120k prefill takes the whole step and a 12-token request waits 78–90 s; at 2304 it waited 4.83 s (2026-09-06). Must be a multiple of 2304, the KDA block size, because prefix caching snaps chunk ends to it: 2048 yields alternating 2048/256-token chunks. Costs nothing: the 200k prefill got *faster*. |
 | `MAX_NUM_BATCHED_TOKENS` | 16384 | Measured the same as 8192 at 200k once chunks are capped (234.1 s against 237.7 s, 2026-09-06). |
 | `KV_CACHE_MEMORY` | 26 GiB | 2.63M tokens with DFlash2. Pinned, `--gpu-memory-utilization` no longer sizes the pool, and vLLM says so at startup. At 28 GiB the head sat near 1 GiB free and eight long requests had a worker OOM-killed. |
-| `FABRIC_SUBNETS` | `CLUSTER_SUBNET`, one root | Each GB10's ConnectX-7 sits on two PCIe roots and one root tops out near 110 Gb/s. NCCL over both doubles all-reduce bandwidth (110 to 190 Gb/s) and took a 126k prefill from 2,412 to 2,680 tok/s (2026-09-26); decode did not move. Needs an IPv4 on the second root's interface in its own subnet, MTU 9000, and the same RoCE v2 GID index on both roots. Set both in `.env`, quoted and space-separated (`FABRIC_SUBNETS="10.0.0. 10.0.1."`). Empty uses `CLUSTER_SUBNET` alone. The numbers at the top use both. |
+| `FABRIC_SUBNETS` | every address mentatd tags `rdma` | Each GB10's ConnectX-7 sits on two PCIe roots and one root tops out near 110 Gb/s. NCCL over both doubles all-reduce bandwidth (110 to 190 Gb/s) and took a 126k prefill from 2,412 to 2,680 tok/s (2026-09-26); decode did not move. Needs an IPv4 on the second root's interface in its own subnet, MTU 9000, the same RoCE v2 GID index on both roots, and both interfaces tagged `rdma` (step 4). To set it by hand instead, quote it and separate the subnets with spaces (`FABRIC_SUBNETS="198.18.0. 198.19.0."`). With only `CLUSTER_SUBNET` set, NCCL uses that one root. The numbers at the top use both. |
 | `MAX_NUM_SEQS` | 32 | Each running request holds a KDA recurrent state for every verify position (1+k = 8 at k=7) out of the KV pool, so the pool caps this, not throughput. With the overrides the drafter's KV moves to its own pool and 50 fit. |
 | DFlash2 `k=7` | | Decodes 121.9 / 91.3 / 38.7 tok/s structured / code / prose on this image without the overrides (`dev/repro/decode.py`, thinking off). On an earlier image (2026-09-23) it gave 109.8 / 88.8 / 52.6, and the checkpoint's own MTP head at k=4 gave 57.2 / 54.4 / 45.6. Costs ~41% of the KV pool: 3.44M tokens with speculation off, 2.02M with it at the same pin, on the pre-nightly image (2026-09-06). |
 | `MOE_BACKEND` | `flashinfer_cutlass` | NVFP4 weights and activations, quantizing activations with the checkpoint's own input scales. The MoE kernels in `experimental/` read its processed tensors, so they need it. `marlin` keeps activations in 16 bits and ignores the input scales. It ran on earlier images and is untested on this one. |
@@ -334,7 +359,27 @@ during `docker build`).
 | `spark_mem_trace.py` | Names whatever crosses that bound, instead of leaving an OOM anonymous. | ours |
 | `link_cuda_headers.sh` | The base ships CUDA libraries without their headers where nvcc looks, which breaks FlashInfer JIT at link time. | ours |
 
-`dev/patch-tests/` holds tests for two of the patches; the image does not use
+LibertAI's sparse-MLA kernel plugin is not mounted. To use it, build it for
+sm_121a into a directory on every box and add an override file:
+
+    # compose/ext.yaml
+    services:
+      glm53:
+        volumes:
+          - /srv/ext:/opt/ext:ro
+        environment:
+          - PYTHONPATH=/opt/ext
+          - VLLM_GLM53_CUDA_SPARSE_MLA=1
+
+    docker compose -f compose/glm53.yaml -f compose/ext.yaml up -d
+
+`VLLM_GLM53_CUDA_SPARSE_MLA` without the plugin drops the working SM90 path
+and leaves the one that fails on this checkpoint. Leave the plugin's
+`VLLM_GLM53_MOE_INPUT_SCALE` unset: it applies one constant activation scale,
+and this checkpoint carries real per-projection scales.
+
+`dev/patch-tests/` holds tests for two of the patches and for the entrypoint's
+mentat discovery (`_entrypoint_discovery_test.sh`); the image does not use
 them. The old recipe's `gb10_topk_fallback.py` is now a flag
 (`--sparse-indexer-topk-backend per_row`). `thinking_budget_guard.py` and
 `glm53_kpool_tail_ring.py` (the spec-decode tail ring,
@@ -382,20 +427,28 @@ stack. Independently reported by tonyd2wild.
 **Workers restart forever with `group 'glm53' already has an active driver session`,
 and the head waits for GPUs.** More than one node is running as the head: every
 head starts a driver, mentat allows one per group, and the others exit and
-restart while the real head never sees its workers. Set `ROLE=worker` in
-`compose/.env` on every node except the head (`.env.example` ships `ROLE=head`),
-keep `HEAD_HOST` the head's address everywhere, then take all four down and start
+restart while the real head never sees its workers. With roles set by hand,
+set `ROLE=worker` in `compose/.env` on every node except the head, keep
+`HEAD_HOST` the head's address everywhere, then take all four down and start
 them again. An image built from this tree refuses a head whose `VLLM_HOST_IP` is not
-`HEAD_HOST`, with a FATAL line naming the fix. If the error remains with the roles
+`HEAD_HOST`, with a FATAL line naming the fix. Elected boxes agree on one
+head, but a box with `ROLE=head` in its `.env` beside them is a second one:
+set the roles on every box or on none. If the error remains with the roles
 right, an earlier head's session is still held: with all four down, run
 `mentat stop --group glm53` against the head's daemon (or restart its mentatd).
 
-**Boot hangs at `waiting for 4 GPUs, have 1`.** Every box must set `HEAD_HOST`
-to the head, not to itself. mentat replicates an agent's *registration*
-across the mesh but not its *liveness*: point a box at its own daemon and the
-head lists the agent yet marks it `alive=false degraded=true`, while that
-box's own daemon sees only its own agent. The GPU gate asks whichever daemon
-it was told about, so it never counts more than one (seen 2026-09-06). Confirm
+**Boot waits at `electing: waiting for 4 agents in group glm53, have 3`.** A
+box has not registered. Every box starts its agent before the election, so
+the missing one is not running, cannot reach its own mentatd, or runs under
+another `MENTAT_GROUP`. `docker exec mentatd mentatd status --group glm53`
+on any box lists the agents mentat's head holds: each box should appear once
+with `alive=true`.
+
+**Boot hangs at `waiting for 4 GPUs, have 1`, with `HEAD_HOST` set.** Every
+box must set `HEAD_HOST` to the head's address. Seen 2026-09-06 on a
+mentat that held each agent on the daemon it registered with: point a box at
+its own daemon and the head lists the agent yet marks it `alive=false
+degraded=true`, while that box's own daemon sees only its own agent. Confirm
 with `docker exec mentatd mentatd status` on the head: every agent should read
 `alive=true`.
 

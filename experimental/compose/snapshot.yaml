@@ -11,4 +11,4 @@ services:
       - ../experimental/snapshot/flashinfer_cutlass_moe.py:/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/fused_moe/experts/flashinfer_cutlass_moe.py:ro
     environment:
       - VLLM_WEIGHT_SNAPSHOT_DIR=/root/.cache/weight-snapshots
-      - VLLM_WEIGHT_SNAPSHOT_TAG=spark-glm53:v8
+      - VLLM_WEIGHT_SNAPSHOT_TAG=2026-09-28

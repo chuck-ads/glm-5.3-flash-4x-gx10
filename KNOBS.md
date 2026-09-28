@@ -1,6 +1,6 @@
 # Knobs
 
-Environment variables read by `entrypoint.sh`, extracted mechanically.
+Environment variables read by `entrypoint.sh` and `discover.sh`, extracted mechanically.
 A default of _(none)_ means the variable is referenced without one --
 check the entrypoint for whether it is required or merely optional.
 Meaning and rationale stay in the entrypoint and compose comments.
@@ -13,7 +13,8 @@ Meaning and rationale stay in the entrypoint and compose comments.
 | `CACHE_ROOT` | `/root/.cache` |
 | `CACHE_TAG` | `${SHARED_TAG}-${_opthash}` _(derived)_ |
 | `CHAT_TEMPLATE` | `/usr/local/share/glm53-chat-template.jinja` |
-| `CLUSTER_SUBNET` | _(none)_ |
+| `CLUSTER_SUBNET` | `${FABRIC_SUBNETS%% *}` _(derived)_ |
+| `CONTAINER_NAME` | `glm53` |
 | `CUDAGRAPH_CAPTURE_SIZES` | `8 16 32 64 96 128 192 256` |
 | `CUDAGRAPH_MODE` | `FULL_AND_PIECEWISE` |
 | `CUDA_GRAPHS` | `1` |
@@ -24,11 +25,11 @@ Meaning and rationale stay in the entrypoint and compose comments.
 | `FABRIC_CHECK_GBPS_PER_DEVICE` | `95` |
 | `FABRIC_CHECK_PORT` | `29511` |
 | `FABRIC_CHECK_TIMEOUT_S` | `120` |
-| `FABRIC_SUBNETS` | `$CLUSTER_SUBNET` _(derived)_ |
+| `FABRIC_SUBNETS` | `$CLUSTER_SUBNET`, else one prefix per `rdma`-tagged address from mentatd _(derived)_ |
 | `FABRIC_WAIT_S` | `0` |
 | `GLOO_SOCKET_IFNAME` | _(empty)_ |
 | `GPU_MEM_UTIL` | `0.88` |
-| `HEAD_HOST` | _(none)_ |
+| `HEAD_HOST` | elected when `ROLE` is also unset _(derived)_ |
 | `ITERATION_DETAILS` | _(empty)_ |
 | `KV_CACHE_DTYPE` | `fp8_e4m3` |
 | `KV_CACHE_MEMORY` | `27917287424` |
@@ -42,6 +43,7 @@ Meaning and rationale stay in the entrypoint and compose comments.
 | `MENTAT_GROUP` | `${SERVICE_NAME:-glm53}` _(derived)_ |
 | `MENTAT_MCP_API` | `${STATUS_PORT:-8082}/mcp` _(derived)_ |
 | `MENTAT_MODEL_PROVIDER` | `vllm` |
+| `MENTAT_NODE_IP` | mentatd's `node_ip` when electing _(derived)_ |
 | `MENTAT_OPENAI_API` | `${API_PORT:-8002}/v1` _(derived)_ |
 | `MODEL_DIR` | `/models/glm-5.3-flash-nvfp4` |
 | `MOE_BACKEND` | `flashinfer_cutlass` |
@@ -53,11 +55,11 @@ Meaning and rationale stay in the entrypoint and compose comments.
 | `NCCL_SOCKET_IFNAME` | `$GLOO_SOCKET_IFNAME` _(derived)_ |
 | `PREFLIGHT` | `1` |
 | `PYTORCH_CUDA_ALLOC_CONF` | `expandable_segments:True` |
-| `RAY_ADDRESS` | `${HEAD_HOST:?set HEAD_HOST to the head node address}:6379` _(derived)_ |
+| `RAY_ADDRESS` | `127.0.0.1:6379` when electing, else `${HEAD_HOST:?set HEAD_HOST to the head node address}:6379` _(derived)_ |
 | `RAY_MEMORY_MONITOR_REFRESH_MS` | `0` |
 | `RAY_OBJECT_STORE_MEMORY` | `4294967296` |
 | `ROCE_SETTLE_S` | `60` |
-| `ROLE` | `head` |
+| `ROLE` | elected when `HEAD_HOST` is also unset, else `head` |
 | `SAFETENSORS_LOAD_STRATEGY` | `eager` |
 | `SELF_TEST` | `1` |
 | `SERVED_NAME` | `glm53` |
@@ -75,6 +77,6 @@ Meaning and rationale stay in the entrypoint and compose comments.
 | `TP` | `4` |
 | `TRITON_CACHE_DIR` | `${CACHE_ROOT}/${SHARED_TAG}/triton` _(derived)_ |
 | `VLLM_ENGINE_READY_TIMEOUT_S` | `3600` |
-| `VLLM_HOST_IP` | _(empty)_ |
+| `VLLM_HOST_IP` | the `lan`-tagged address from mentatd, else its `node_ip` _(derived)_ |
 | `VLLM_WEIGHT_SNAPSHOT_DIR` | _(empty)_ |
 | `WORKER_WAIT_S` | `0` |
