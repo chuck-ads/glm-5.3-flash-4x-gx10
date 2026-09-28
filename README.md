@@ -2,36 +2,39 @@
 
 GLM-5.3-Flash (NVFP4) served by vLLM at TP=4 across four GB10 boxes over
 RoCE, with DFlash2 speculative decoding and a 524k context window. The base
-is a stock vLLM nightly plus a handful of small patches and a newer FlashKDA.
+is an unmodified vLLM nightly plus a handful of small patches and a newer FlashKDA.
 Ray is replaced by [mentat](https://github.com/mmastrac/mentat).
 
-Measured on the same four boxes, 2026-09-27 and 28, on this image (nightly
-ddd6fbca), temperature 0, nvidia/GLM-5.3-Flash-NVFP4, both ConnectX-7 PCIe
-roots in use. "Stock" is `compose/glm53.yaml` alone. "Overrides" adds every
-file in `experimental/compose/`: RDMA collectives, weight snapshots, FP8 and
-NVFP4 dense layers, custom MoE and attention kernels, sequence parallel
-prefill and a draft-length scheduler. They replace files inside this image, so
-they only apply to it. [experimental/README.md](experimental/README.md) has
-the details and how to turn each one off.
+Measured on four boxes, 2026-09-27 and 28, temperature 0,
+nvidia/GLM-5.3-Flash-NVFP4, both ConnectX-7 PCIe roots in use, with every
+override in `experimental/compose/`: RDMA collectives, weight snapshots, FP8
+and NVFP4 dense layers, custom MoE and attention kernels, sequence parallel
+prefill and a draft-length scheduler. They replace files inside the image
+this repo builds, and each one can be turned off.
+[experimental/README.md](experimental/README.md) has the details.
 
-| | stock | overrides |
-|---|---|---|
-| prefill @32k, cold | 2,730 tok/s | 4,946 tok/s |
-| prefill @128k, cold | 2,679 tok/s | 4,750 tok/s |
-| decode, counting | 121.9 tok/s | 170.3 tok/s |
-| decode, code | 91.3 tok/s | 120.8 tok/s |
-| decode, prose | 38.7 tok/s | 65.8 tok/s |
-| 1 / 2 / 4 / 8 streams, aggregate | 85.5 / 65.4 / 99.5 / 147.8 tok/s | 126 / 102 / 146 / 198 tok/s |
-| 16 streams, aggregate | | 271 tok/s |
-| KV pool (26 GiB pin, fp8_e4m3) | 2.63M tokens | 3.63M tokens |
-| requests decoding at once | 32 | 50 |
-| boot, once snapshots exist | ~8 min | ~3.5 min |
-| needle recall | | 12/12 up to 507k tokens |
+| | |
+|---|---|
+| prefill @32k, cold | 4,946 tok/s |
+| prefill @128k, cold | 4,750 tok/s |
+| decode, counting / code / prose | 170.3 / 120.8 / 65.8 tok/s |
+| 1 / 2 / 4 / 8 / 16 streams, aggregate | 126 / 102 / 146 / 198 / 271 tok/s |
+| KV pool (26 GiB pin, fp8_e4m3) | 3.63M tokens |
+| requests decoding at once | 50 |
+| boot, once snapshots exist | ~3.5 min |
+| needle recall | 12/12 up to 507k tokens |
 
 Prefill is first-touch on random words, so nothing is cached. Decode is
 thinking off, 512 tokens, median of 3 (`dev/repro/decode.py`). Streams each
-generate 512 tokens from rotating code and prose prompts. GSM8K, HumanEval
-and the tool-call checks come out the same or better with the overrides.
+generate 512 tokens from rotating code and prose prompts.
+
+[RigMark](https://github.com/alexellis/rigmark), reasoning effort low:
+
+| | |
+|---|---|
+| decode, code / prose / structured | 107.9 / 61.7 / 157.1 tok/s |
+| prefill @8k, cold / immediate replay | 4,647 / 10,476 tok/s |
+| output gates | 6/6 |
 
 [model.yaml](model.yaml) has the checkpoints and the memory footprint, and
 [KNOBS.md](KNOBS.md) lists every environment variable the entrypoint reads.
@@ -364,7 +367,7 @@ during `docker build`).
 | `glm53_dflash2_kv_groups.py` | The GLM-5-Next KV grouper gives up on the drafter's sliding-window layers and the model dies unifying page sizes. Keeps the target's groups and adds the drafter's. | ours |
 | `vllm-58720-routed-experts.patch` | Indexes the expert mapping once per load instead of scanning it for every checkpoint tensor. Merged after this nightly. | [vllm#58720](https://github.com/vllm-project/vllm/pull/58720) |
 | `image/flashkda/` | Rebuilds `vllm/_flashkda_C` from FlashKDA 17a037d. The nightly's b59532f rounds the KDA recurrent state to bf16 every 16 tokens, and long prefills then corrupt tool-call output; 17a037d keeps it in fp32. | [vllm#58846](https://github.com/vllm-project/vllm/pull/58846), open |
-| `glm53_reasoning_always_parsed.py` | Thinking off maps to low reasoning effort (see step 4), so the model always emits a short `<think>` block. Stock `glm47_moe` stops parsing `<think>` when thinking is off, and the trace would land in `content`. | ours |
+| `glm53_reasoning_always_parsed.py` | Thinking off maps to low reasoning effort (see step 4), so the model always emits a short `<think>` block. vLLM's `glm47_moe` stops parsing `<think>` when thinking is off, and the trace would land in `content`. | ours |
 | `glm47_failclosed.py` | Tool-call parser plugin (`--tool-call-parser glm47_failclosed`). Checks each call against the tools the request offered; a call with a bad name or argument keys comes back as a retryable call whose sentinel argument names the mistake, instead of being dropped or leaking into history. Containment, not a cure. | ours, after [NNNtrance](https://github.com/NNNtrance/GLM-5.3-Flash-EXL3-DGX-Spark) #7 and #11 |
 | `spin_wait.py` | vLLM's shm queue spins for `busy_loop_s` (1 s) after each message; on GB10 the CPU and GPU share one power budget, so the spin costs ~20 °C and decode. 0.002 keeps the fast path; 0 (always block) measured slower. | [nacyot](https://artifacts.nacyot.com/vllm-spin-wait-gb10-en/) |
 | `worker_memory_cap.py` | Caps each worker's share of unified memory (`TORCH_MEM_FRACTION`, 0.92). vLLM never calls `set_per_process_memory_fraction`, so nothing else bounds a worker. | ours |
