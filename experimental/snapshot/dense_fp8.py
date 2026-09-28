@@ -137,6 +137,16 @@ class W4DenseLinearMethod(LinearMethodBase):
         return y.reshape(*shape[:-1], N)
 
 
+class W4LMHeadMethod(W4DenseLinearMethod):
+    """The lm_head in NVFP4 (selected by VLLM_DENSE_W4 matching "lm_head")."""
+
+    def __init__(self, inner):
+        self.inner = inner
+
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
+
+
 def _quantize_w4(module: torch.nn.Module) -> int:
     """NVFP4 with round to nearest: e4m3 scale per 16 k, one fp32 scale per
     tensor, packed into megadense4.cu's tiled layout. Also keeps an FP8 copy
@@ -200,7 +210,13 @@ def convert(model: torch.nn.Module) -> None:
             saved += _quantize(m)
             m.quant_method = Fp8DenseLinearMethod()
             count += 1
-        elif lm_head and isinstance(m, ParallelLMHead) and not isinstance(method, Fp8LMHeadMethod):
+        elif (lm_head and isinstance(m, ParallelLMHead) and w4 is not None and w4.search(name)
+              and not isinstance(method, (Fp8LMHeadMethod, W4LMHeadMethod)) and w.shape[1] % 128 == 0):
+            _w4()
+            saved += _quantize_w4(m)
+            m.quant_method = W4LMHeadMethod(m.quant_method)
+            count4 += 1
+        elif lm_head and isinstance(m, ParallelLMHead) and not isinstance(method, (Fp8LMHeadMethod, W4LMHeadMethod)):
             saved += _quantize(m)
             m.quant_method = Fp8LMHeadMethod(m.quant_method)
             count += 1
