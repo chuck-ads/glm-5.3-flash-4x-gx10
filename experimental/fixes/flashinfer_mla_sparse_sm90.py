@@ -405,6 +405,12 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
     ) -> FlashInferMLASparseSM90Metadata:
         metadata = super().build(common_prefix_len, common_attn_metadata, fast_build)
         assert isinstance(metadata, FlashInferMLASparseSM90Metadata)
+        if _TRITON:
+            # The Triton kernel needs no host-side schedule, and the host KV
+            # lengths cost a device-to-host sync per step under async
+            # scheduling (it stalls the CPU until the previous step ends).
+            metadata.state = self.state
+            return metadata
         # Replan every step outside any CUDA graph capture with this step's
         # exact per-row lengths; captured runs read the refreshed buffers.
         num_rows, kv_lens = self._kv_lens_host(common_attn_metadata)
@@ -415,8 +421,7 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
         ):
             num_rows = metadata.num_decode_tokens
             kv_lens = kv_lens[:num_rows]
-        if not _TRITON:  # the Triton kernel needs no host-side schedule
-            self.state.plan(num_rows, kv_lens)
+        self.state.plan(num_rows, kv_lens)
         metadata.state = self.state
         return metadata
 
