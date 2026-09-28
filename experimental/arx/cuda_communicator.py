@@ -350,24 +350,28 @@ class CudaCommunicator(DeviceCommunicatorBase):
             scope="global",
         )
 
-    # GB10: sequence-parallel collectives for decode-sized tensors, as arx
-    # all-reduces (~13-27 us against ~80 for NCCL). Returning None hands the
-    # call to NCCL's own reduce-scatter / all-gather (prefill sizes).
-    def custom_reduce_scatter(self, input_):
+    # GB10: sequence-parallel collectives over RDMA, tried first by
+    # custom_all_gather / custom_reduce_scatter below: arx all-reduces for
+    # decode sizes (~13-27 us against ~80 for NCCL), arxbig for prefill-sized
+    # gathers. Returning None hands the call on.
+    def _arx_reduce_scatter(self, input_):
         arx_comm = self.arx_comm
         if arx_comm is None or arx_comm.disabled or not arx_comm.should_use(input_):
             return None
         chunk = input_.shape[0] // self.world_size
         return arx_comm.all_reduce(input_)[self.rank_in_group * chunk:(self.rank_in_group + 1) * chunk]
 
-    def custom_all_gather(self, input_):
+    def _arx_all_gather(self, input_):
+        # arxbig's gather lands in pinned memory, and the GEMMs that read it
+        # there ran 16% slower overall than NCCL's gather into device memory.
         big = self.arxbig
-        if big is not None and not big.disabled and big.should_gather(input_):
+        if big is not None and not big.disabled and big.gather and big.should_gather(input_):
             return big.all_gather(input_)
         # Each rank's rows in their own slot of a zero tensor: the sum is the
         # concatenation, exactly (x + 0 is x).
         arx_comm = self.arx_comm
-        if arx_comm is None or arx_comm.disabled or input_.dtype != torch.bfloat16:
+        if (arx_comm is None or arx_comm.disabled or input_.dtype != torch.bfloat16
+                or input_.numel() * 2 * self.world_size > arx_comm.max_bytes):
             return None
         full = input_.new_zeros(input_.shape[0] * self.world_size, *input_.shape[1:])
         if not arx_comm.should_use(full):
@@ -455,12 +459,18 @@ class CudaCommunicator(DeviceCommunicatorBase):
         return out
 
     def custom_all_gather(self, input_: torch.Tensor) -> torch.Tensor | None:
+        out = self._arx_all_gather(input_)
+        if out is not None:
+            return out
         ca_comm = self.ca_comm
         if ca_comm is None:
             return None
         return ca_comm.custom_all_gather(input_.contiguous())
 
     def custom_reduce_scatter(self, input_: torch.Tensor) -> torch.Tensor | None:
+        out = self._arx_reduce_scatter(input_)
+        if out is not None:
+            return out
         ca_comm = self.ca_comm
         if ca_comm is None:
             return None

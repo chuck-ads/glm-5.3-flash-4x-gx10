@@ -28,7 +28,8 @@ Leave a compose file out to drop that piece, or set its switch in `.env` (every 
 
 | Switch | Default | What it does |
 |---|---|---|
-| `VLLM_ARXBIG` | 1 | RDMA all-gather for prefill (arx.yaml) |
+| `VLLM_ARXBIG` | 1 | arxbig RDMA collectives for prefill (arx.yaml) |
+| `VLLM_ARXBIG_AG` | 0 | route prefill all-gathers through arxbig; off because its output sits in pinned memory, where GEMMs reading it run 3.7x slower |
 | `VLLM_ARXBIG_RS` | 1 | RDMA reduce-scatter buffers (~0.5 GB pinned per rank); needed by `VLLM_GLM_SP_MOE_FUSED` |
 | `VLLM_GLM_SP_TP` | 1 | sequence parallelism for forwards of `VLLM_GLM_SP_MIN_TOKENS` (1024) or more (sp.yaml) |
 | `VLLM_GLM_SP_FP8_GATHER` | 1 | gather KDA attention inputs as FP8 |
@@ -133,8 +134,10 @@ Boot goes from about 8 minutes to about 3.5 once snapshots exist.
 - **arxbig** (`arx/arxbig.cu`, `VLLM_ARXBIG`, `VLLM_ARXBIG_RS`): all-gather and
   reduce-scatter over RoCE for prefill-sized SP collectives, from pinned
   buffers the ConnectX writes directly. The all-gather is ~10% faster than
-  NCCL's (187 vs 165 Gb/s), which alone is worth <1% of prefill; the point is
-  the reduce-scatter. With `VLLM_GLM_SP_MOE_FUSED`, MoE layers under SP run the
+  NCCL's (187 vs 165 Gb/s), but its result lands in pinned memory, and on
+  GB10 a GEMM that reads its operand from pinned memory runs 3.7x slower, so
+  prefill gathers stay on NCCL (`VLLM_ARXBIG_AG=0`). The point is the
+  reduce-scatter. With `VLLM_GLM_SP_MOE_FUSED`, MoE layers under SP run the
   router, the shared expert and moe_prefill's fc1/fc2 in model.py, and one
   kernel writes shared + scaled routed sum (fp32, rounded once) straight into
   the send buffer, publishing rows as it goes, so the network runs under the

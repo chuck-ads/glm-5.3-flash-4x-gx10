@@ -105,6 +105,7 @@ class ArxBig:
         global _big_ext
         self.disabled = True
         self.rs = False
+        self.gather = False
         hcas = [h.strip("=^").split(":")[0] for h in os.environ.get("NCCL_IB_HCA", "").split(",") if h]
         if len(hcas) != 2:
             logger.warning("arxbig needs two RDMA devices in NCCL_IB_HCA, got %r; using NCCL", hcas)
@@ -128,6 +129,7 @@ class ArxBig:
             dist.barrier(group=group)
         self.ext, self.world, self.slot = _big_ext, world, slot
         self.min_bytes = int(os.environ.get("VLLM_ARXBIG_MIN_KB", "1024")) << 10
+        self.gather = os.environ.get("VLLM_ARXBIG_AG") == "1"
         self.disabled = False
         logger.info("arxbig all-gather: rank %d/%d, %d MiB slots", rank, world, slot >> 20)
 
