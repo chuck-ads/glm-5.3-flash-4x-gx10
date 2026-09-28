@@ -4,13 +4,53 @@ Compose overrides that stack on `compose/glm53.yaml`. Each one mounts files
 over the v8 image (vLLM nightly ddd6fbca); several replace whole vLLM or
 FlashInfer files, so they only match that image.
 
-```
-docker compose -f compose/glm53.yaml \
-  -f experimental/compose/arx.yaml -f experimental/compose/snapshot.yaml \
-  -f experimental/compose/adaptive-k.yaml -f experimental/compose/fp8.yaml \
-  -f experimental/compose/megamoe.yaml -f experimental/compose/fixes.yaml \
-  -f experimental/compose/sp.yaml up -d
-```
+## How to use it
+
+Requirements: the v8 image and the normal four-node setup from the main README (the same `compose/glm53.yaml` and a per-node `compose/.env` on every box). The overrides replace files inside that image, so they do not apply to other images.
+
+1. In each node's `compose/.env`, set the two RDMA devices, one per ConnectX root, in the same subnet order on every node, for example `NCCL_IB_HCA=rocep1s0f0,roceP2p1s0f0`. arx and arxbig need exactly two; with anything else they log a warning and fall back to NCCL. They use `NCCL_IB_GID_INDEX` for the GID index, or 5 if it is unset; check it exists on every node (`ibv_devinfo -v`).
+2. Start the stack with every override, on every node (head first, as usual). Order matters: later files win.
+
+   ```
+   docker compose -f compose/glm53.yaml \
+     -f experimental/compose/arx.yaml -f experimental/compose/snapshot.yaml \
+     -f experimental/compose/adaptive-k.yaml -f experimental/compose/fp8.yaml \
+     -f experimental/compose/megamoe.yaml -f experimental/compose/fixes.yaml \
+     -f experimental/compose/sp.yaml up -d
+   ```
+
+3. The first boot loads the checkpoint normally (~8 min), compiles the CUDA extensions, and writes a processed-weight snapshot per rank under `CACHE_HOME/weight-snapshots` (~48 GB per node). Later boots restore it (~3.5 min).
+4. Check: `bash smoketest/run.sh http://<head>:8002` should pass 8/8, and each rank's log should show `arx all-reduce: rank r/4` and `arxbig all-gather: rank r/4`.
+
+### Turning pieces off
+
+Leave a compose file out to drop that piece, or set its switch in `.env` (every node must use the same values):
+
+| Switch | Default | What it does |
+|---|---|---|
+| `VLLM_ARXBIG` | 1 | RDMA all-gather for prefill (arx.yaml) |
+| `VLLM_ARXBIG_RS` | 1 | RDMA reduce-scatter buffers (~0.5 GB pinned per rank); needed by `VLLM_GLM_SP_MOE_FUSED` |
+| `VLLM_GLM_SP_TP` | 1 | sequence parallelism for forwards of `VLLM_GLM_SP_MIN_TOKENS` (1024) or more (sp.yaml) |
+| `VLLM_GLM_SP_FP8_GATHER` | 1 | gather KDA attention inputs as FP8 |
+| `VLLM_GLM_SP_MOE_FUSED` | 1 | MoE combine feeding the RDMA reduce-scatter; needs arx.yaml with `VLLM_ARXBIG_RS=1` and megamoe.yaml with `VLLM_MOE_PREFILL=1` |
+| `VLLM_GLM_ARX_PREFETCH` | 1 | L2 prefetch during decode all-reduces; needs arx.yaml |
+| `VLLM_MEGAMOE` | 1 | decode MoE kernel for batches of up to `VLLM_MEGAMOE_MAX_TOKENS` (8) |
+| `VLLM_MOE_PREFILL` | 1 | prefill MoE kernel for batches of `VLLM_MOE_PREFILL_MIN_TOKENS` (1024) or more |
+| `VLLM_MOE_PREFILL_Y8` | 1 | FP8 per-expert rows in the fused prefill MoE |
+| `VLLM_TRITON_SPARSE_MLA` | 1 | Triton sparse MLA instead of FlashInfer's (fixes.yaml) |
+| `VLLM_DENSE_W4` | in_proj, o_proj, shared experts, drafter | regex of dense layers stored as NVFP4 (the rest are FP8); add `\|lm_head$` for the opt-in NVFP4 lm_head |
+| `VLLM_DENSE_FP8_LM_HEAD` | 1 | FP8 lm_head |
+| `VLLM_ADAPTIVE_K_COST_MS` | measured on this stack | step cost per verify length, used by the adaptive-k scheduler |
+
+Debug switches: `VLLM_MOE_PREFILL_CHECK=N` and `VLLM_GLM_SP_MOE_CHECK=N` also run the stock path on the first N prefill batches and log the difference.
+
+### The snapshot tag
+
+A snapshot holds processed weights, so anything that changes how weights are processed needs a new `VLLM_WEIGHT_SNAPSHOT_TAG` (set in fp8.yaml) or a boot without restoring: changing `VLLM_DENSE_W4`, `VLLM_DENSE_FP8*`, the MoE backend, or `max_num_batched_tokens`. A shape change fails the restore with an error; a same-shape change (such as which layers are NVFP4) would restore stale weights without one.
+
+### Quality check
+
+`experimental/quality/quality.py` (GSM8K and HumanEval against a running server; see its docstring for the data files and the no-network HumanEval run).
 
 ## Results
 
