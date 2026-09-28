@@ -6,9 +6,9 @@
 services:
   glm53:
     volumes:
-      - /home/admin/megamoe-vllm/megamoe_rm.cu:/opt/megamoe/megamoe_rm.cu:ro
-      - /home/admin/megamoe-vllm/moe_prefill.cu:/opt/megamoe/moe_prefill.cu:ro
-      - /home/admin/megamoe-vllm/megamoe_vllm.py:/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/fused_moe/megamoe_vllm.py:ro
+      - ../experimental/megamoe/megamoe_rm.cu:/opt/megamoe/megamoe_rm.cu:ro
+      - ../experimental/megamoe/moe_prefill.cu:/opt/megamoe/moe_prefill.cu:ro
+      - ../experimental/megamoe/megamoe_vllm.py:/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/fused_moe/megamoe_vllm.py:ro
     environment:
       - VLLM_MEGAMOE=${VLLM_MEGAMOE:-1}
       - VLLM_MEGAMOE_MAX_TOKENS=${VLLM_MEGAMOE_MAX_TOKENS:-8}

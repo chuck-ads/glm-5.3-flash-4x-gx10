@@ -1,10 +1,18 @@
 """GSM8K (first N) and HumanEval generations against a running server; HumanEval
-programs are written out for a separate no-network run. usage: quality.py LABEL [gsm_n]"""
+programs are written out for a separate no-network run.
+
+usage: quality.py LABEL [gsm_n]. Reads $QUALITY_DIR (default ./quality-data):
+gsm8k_test.jsonl (openai/grade-school-math) and HumanEval.jsonl
+(openai/human-eval); writes $QUALITY_DIR/LABEL/. Then score HumanEval with
+  docker run --rm --network none -v $QUALITY_DIR/LABEL:/q:ro -v $PWD/run_he.py:/run_he.py:ro \
+    --entrypoint python3 <serving image> /run_he.py /q
+"""
 import concurrent.futures as cf, json, os, re, sys, urllib.request
 
 LABEL = sys.argv[1]; GSM_N = int(sys.argv[2]) if len(sys.argv) > 2 else 250
-BASE = "http://127.0.0.1:8002/v1/chat/completions"
-OUT = f"/home/admin/quality/{LABEL}"; os.makedirs(f"{OUT}/he", exist_ok=True)
+BASE = os.environ.get("QUALITY_URL", "http://127.0.0.1:8002") + "/v1/chat/completions"
+DATA = os.environ.get("QUALITY_DIR", "quality-data")
+OUT = f"{DATA}/{LABEL}"; os.makedirs(f"{OUT}/he", exist_ok=True)
 
 def chat(prompt, max_tokens=1024):
     body = {"model": "glm53", "messages": [{"role": "user", "content": prompt}], "max_tokens": max_tokens,
@@ -17,7 +25,7 @@ def num(s):
     try: return float(s)
     except ValueError: return None
 
-gsm = [json.loads(l) for l in open("/home/admin/quality/gsm8k_test.jsonl")][:GSM_N]
+gsm = [json.loads(l) for l in open(f"{DATA}/gsm8k_test.jsonl")][:GSM_N]
 def do_gsm(q):
     txt = chat("Solve the problem. Show brief working, then give the final answer on the last line as '#### <number>'.\n\n" + q["question"])
     m = re.findall(r"####\s*([-\d.,$]+)", txt) or re.findall(r"(-?[\d,]*\.?\d+)", txt)
@@ -30,7 +38,7 @@ acc = sum(ok for ok, _ in res) / len(res)
 json.dump([t for _, t in res], open(f"{OUT}/gsm8k.json", "w"))
 print(f"{LABEL} GSM8K first {len(gsm)}: {acc * 100:.1f}%", flush=True)
 
-he = [json.loads(l) for l in open("/home/admin/quality/HumanEval.jsonl")]
+he = [json.loads(l) for l in open(f"{DATA}/HumanEval.jsonl")]
 PRELUDE = "from typing import *\nimport math, re, string, collections, itertools, functools, heapq, bisect\n"
 def do_he(p):
     txt = chat("Complete the following Python function. Reply with the whole function in one ```python code block and nothing else.\n\n" + p["prompt"])

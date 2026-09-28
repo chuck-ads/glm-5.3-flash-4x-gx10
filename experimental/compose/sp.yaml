@@ -13,7 +13,7 @@
 services:
   glm53:
     volumes:
-      - /home/admin/gb10-fixes/model.py:/usr/local/lib/python3.12/dist-packages/vllm/models/glm5next/common/model.py:ro
+      - ../experimental/fixes/model.py:/usr/local/lib/python3.12/dist-packages/vllm/models/glm5next/common/model.py:ro
     environment:
       - VLLM_GLM_SP_TP=${VLLM_GLM_SP_TP:-1}
       - VLLM_GLM_SP_MIN_TOKENS=${VLLM_GLM_SP_MIN_TOKENS:-1024}

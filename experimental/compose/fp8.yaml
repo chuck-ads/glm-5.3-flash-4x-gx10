@@ -6,8 +6,8 @@
 services:
   glm53:
     volumes:
-      - /home/admin/snapshot-vllm/dense_fp8.py:/usr/local/lib/python3.12/dist-packages/vllm/model_executor/model_loader/dense_fp8.py:ro
-      - /home/admin/megamoe-vllm/megadense4.cu:/opt/megamoe/megadense4.cu:ro
+      - ../experimental/snapshot/dense_fp8.py:/usr/local/lib/python3.12/dist-packages/vllm/model_executor/model_loader/dense_fp8.py:ro
+      - ../experimental/megamoe/megadense4.cu:/opt/megamoe/megadense4.cu:ro
     environment:
       - VLLM_DENSE_FP8=1
       - VLLM_DENSE_FP8_LM_HEAD=${VLLM_DENSE_FP8_LM_HEAD:-1}
