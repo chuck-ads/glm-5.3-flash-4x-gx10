@@ -10,6 +10,7 @@ services:
       - ../experimental/fixes/tilelang_kernels.py:/usr/local/lib/python3.12/dist-packages/vllm/model_executor/kernels/mhc/tilelang_kernels.py:ro
       - ../experimental/fixes/flashinfer_mla_sparse_sm90.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/mla/flashinfer_mla_sparse_sm90.py:ro
       - ../experimental/fixes/gb10_sparse_mla.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/mla/gb10_sparse_mla.py:ro
+      - ../experimental/fixes/gdn_attn.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/gdn_attn.py:ro
     environment:
       - VLLM_MHC_FUSED_MAX_TOKENS=${VLLM_MHC_FUSED_MAX_TOKENS:-32}
       - VLLM_TRITON_SPARSE_MLA=${VLLM_TRITON_SPARSE_MLA:-1}
