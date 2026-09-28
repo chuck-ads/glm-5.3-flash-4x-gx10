@@ -48,6 +48,9 @@ services:
       # boot and fails (seen on one node on 2026-08-26), and a model that only
       # starts when the NAS is awake will eventually fail to start.
       - ${MODEL_HOST_DIR:?set MODEL_HOST_DIR in .env}:/models/glm-5.3-flash-nvfp4:ro
+      # The host's list of running systemd units, read by the preflight to warn
+      # about a desktop session (README, "What you need").
+      - /run/systemd/units:/host/systemd-units:ro
       # The DFlash2 drafter, also on every node: speculation runs on every TP
       # rank. A separate Qwen3-based model that reads auxiliary hidden states
       # from target layers 5, 14, 24, 33 and 42 (image/patches/glm53_eagle3_aux.py

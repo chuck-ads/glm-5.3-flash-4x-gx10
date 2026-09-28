@@ -201,6 +201,117 @@ export NCCL_MAX_NCHANNELS="${NCCL_MAX_NCHANNELS:-8}"
 # confirm both roots are in use.
 export NCCL_DEBUG="${NCCL_DEBUG:-INFO}"
 
+# --- preflight: things that make the stack slow or fragile without failing --
+# One table, WARN rows first to read, never fatal. PREFLIGHT=0 skips it.
+preflight() {
+  local rows=() warns=0 dev nd mtu rate state phys cur max tp kv need avail swap fs free apps tmpl
+  row() { rows+=("$1|$2|$3"); [[ "$3" == WARN ]] && warns=$(( warns + 1 )); return 0; }
+  local -a devs; IFS=, read -r -a devs <<< "$(sed -E 's/^[=^]+//; s/:[0-9]+//g' <<< "$NCCL_IB_HCA")"
+  (( ${#devs[@]} >= 2 )) && row "fabric devices" "${NCCL_IB_HCA}" ok \
+    || row "fabric devices" "${NCCL_IB_HCA} (one PCIe root tops out near 110 Gb/s; set FABRIC_SUBNETS to both)" WARN
+  local roots; roots=$(for dev in "${devs[@]}"; do basename "$(readlink -f "/sys/class/infiniband/$dev/device")" | cut -d: -f1-2; done | sort -u | wc -l)
+  (( ${#devs[@]} < 2 || roots >= 2 )) || row "PCIe roots" "all fabric devices share one root" WARN
+  for dev in "${devs[@]}"; do
+    local p=/sys/class/infiniband/$dev
+    [[ -d $p ]] || { row "$dev" "no such device" WARN; continue; }
+    nd=$(ls "$p/device/net" 2>/dev/null | head -1)
+    state=$(cut -d' ' -f2 "$p/ports/1/state"); phys=$(cut -d' ' -f2- "$p/ports/1/phys_state")
+    [[ $state == ACTIVE ]] && row "$dev link" "$state, $phys" ok || row "$dev link" "$state, $phys" WARN
+    rate=$(cut -d' ' -f1 "$p/ports/1/rate")
+    (( rate >= 200 )) && row "$dev rate" "$(cat "$p/ports/1/rate")" ok || row "$dev rate" "$(cat "$p/ports/1/rate") (expected 200 Gb/sec)" WARN
+    # RoCE's path MTU is the largest IB MTU that fits the netdev's: 9000 gives
+    # 4096, 1500 gives 1024. arx and arxbig follow it, and smaller packets cost
+    # bandwidth everywhere.
+    mtu=$(cat "/sys/class/net/$nd/mtu" 2>/dev/null || echo 0)
+    (( mtu >= 4200 )) && row "$nd MTU" "$mtu" ok || row "$nd MTU" "$mtu (RoCE path MTU below 4096; set 9000 end to end)" WARN
+    cur="$(cut -d' ' -f1-2 "$p/device/current_link_speed") x$(cat "$p/device/current_link_width")"
+    max="$(cut -d' ' -f1-2 "$p/device/max_link_speed") x$(cat "$p/device/max_link_width")"
+    [[ $cur == "$max" ]] && row "$dev PCIe" "$cur" ok \
+      || row "$dev PCIe" "$cur of $max (degraded link; a full power drain has fixed this before)" WARN
+    # Each up/down is two changes; more than a few since boot means a flapping link.
+    local flaps; flaps=$(cat "/sys/class/net/$nd/carrier_changes" 2>/dev/null || echo 0)
+    (( flaps <= 4 )) || row "$nd flaps" "$flaps carrier changes since boot (check the cable or transceiver)" WARN
+    local c v bad=""
+    for c in local_ack_timeout_err packet_seq_err out_of_sequence; do
+      v=$(cat "$p/ports/1/hw_counters/$c" 2>/dev/null || echo 0)
+      (( v > 0 )) && bad+="$c=$v "
+    done
+    [[ -z $bad ]] || row "$dev retransmits" "${bad% } (since driver load; drops, likely no PFC)" info
+  done
+  # RDMA pins its buffers; a memlock limit fails registration or NCCL's setup.
+  [[ "$(ulimit -l)" == unlimited ]] && row "memlock limit" "unlimited" ok \
+    || row "memlock limit" "$(ulimit -l) KiB (RDMA registration needs unlimited: ulimits memlock -1)" WARN
+  # GPU: a power-delivery or thermal event caps clocks for the whole boot.
+  local ev; ev=$(nvidia-smi --query-gpu=clocks_event_reasons.hw_slowdown,clocks_event_reasons.hw_power_brake_slowdown,clocks_event_reasons.hw_thermal_slowdown,clocks_event_reasons.sw_thermal_slowdown,temperature.gpu --format=csv,noheader 2>/dev/null)
+  if [[ -z $ev ]]; then row "GPU" "nvidia-smi unavailable" WARN
+  elif awk -F', ' '{for (i = 1; i < NF; i++) if ($i == "Active") f = 1} END {exit !f}' <<< "$ev"; then
+    row "GPU slowdown" "$ev (hw, power brake, hw thermal, sw thermal, C)" WARN
+  else row "GPU slowdown" "none, ${ev##*, } C" ok; fi
+  apps=$(nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader 2>/dev/null | tr '\n' ';')
+  [[ -z $apps ]] && row "other GPU processes" "none" ok || row "other GPU processes" "${apps%;}" WARN
+  # Host memory: ~182 GiB of weights split TP ways, the pinned KV, and ~30 GiB
+  # more (CUDA graphs, the activation reserve, NCCL and RDMA buffers, the
+  # processes themselves). TP=2 with 8 GiB of KV came to ~123 GiB and the OOM
+  # killer took a worker mid-prefill.
+  tp=${TP:-4}; kv=$(( ${KV_CACHE_MEMORY:-27917287424} >> 30 ))
+  need=$(( 182 / tp + kv + 30 ))
+  avail=$(( $(awk '/MemAvailable/ {print $2}' /proc/meminfo) >> 20 ))
+  (( avail >= need )) && row "host memory" "${avail} GiB free, ~${need} GiB needed" ok \
+    || row "host memory" "${avail} GiB free, ~${need} GiB needed (stop other models; lower KV_CACHE_MEMORY)" WARN
+  # MemAvailable counts the page cache as free, but on GB10 CUDA allocations
+  # can fail before the kernel reclaims it: NCCL's init died "out of memory"
+  # with ~113 GB cached after a weight copy. Drop the model files' own cached
+  # pages (no privilege needed), then say how to drop the rest.
+  unfree() { echo $(( $(awk '/MemFree/ {print $2}' /proc/meminfo) >> 20 )); }
+  if (( $(unfree) < need )); then
+    python3 - "$MODEL" "${DFLASH_MODEL:-/models/glm-5.3-flash-dflash2}" "${VLLM_WEIGHT_SNAPSHOT_DIR:-}" <<'PY' 2>/dev/null || true
+import os, sys
+for root in filter(None, sys.argv[1:]):
+    for dirpath, _, files in os.walk(root):
+        for name in files:
+            try:
+                fd = os.open(os.path.join(dirpath, name), os.O_RDONLY)
+                os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+                os.close(fd)
+            except OSError:
+                pass
+PY
+  fi
+  local memfree; memfree=$(unfree)
+  local cached; cached=$(( $(awk '/^Cached:/ {print $2}' /proc/meminfo) >> 20 ))
+  (( memfree >= need )) && row "page cache" "${cached} GiB cached, ${memfree} GiB free" ok \
+    || row "page cache" "${cached} GiB cached, ${memfree} GiB free, ~${need} GiB needed (GPU allocations may fail: on the host, sync; echo 3 | sudo tee /proc/sys/vm/drop_caches)" WARN
+  swap=$(( ( $(awk '/SwapTotal/ {print $2}' /proc/meminfo) - $(awk '/SwapFree/ {print $2}' /proc/meminfo) ) >> 20 ))
+  (( swap < 1 )) || row "swap in use" "${swap} GiB (the GPU shares this memory; paging stalls it)" WARN
+  fs=$(findmnt -n -o FSTYPE -T "${MODEL_DIR:-/models/glm-5.3-flash-nvfp4}" 2>/dev/null)
+  [[ $fs == nfs* || $fs == cifs || $fs == fuse* ]] && row "model filesystem" "$fs (every rank reads it all; use local disk)" WARN \
+    || row "model filesystem" "${fs:-unknown}" ok
+  # The first boot at a TP size writes a weight snapshot (snapshot.yaml).
+  if [[ -n "${VLLM_WEIGHT_SNAPSHOT_DIR:-}" ]]; then
+    free=$(df -BG --output=avail "${CACHE_ROOT:-/root/.cache}" 2>/dev/null | tail -1 | tr -dc 0-9)
+    if compgen -G "$VLLM_WEIGHT_SNAPSHOT_DIR/target-tp*of${tp}-*" >/dev/null; then row "weight snapshot" "present for TP=$tp" ok
+    elif (( ${free:-0} >= 182 / tp + 5 )); then row "weight snapshot" "none yet for TP=$tp, ${free} GiB free" ok
+    else row "weight snapshot" "none yet for TP=$tp, ${free:-?} GiB free, needs ~$(( 182 / tp )) GiB" WARN; fi
+  fi
+  tmpl="${MODEL_DIR:-/models/glm-5.3-flash-nvfp4}/chat_template.jinja"
+  if grep -qF '<|begin_of_image|>' "$tmpl" 2>/dev/null && ! grep -q 'set thinking_off' "$tmpl"; then
+    row "chat template" "checkpoint's own, unpatched (README section 4)" WARN
+  fi
+  # A desktop session holds GPU memory and CPU on the shared memory, and these
+  # boxes ship with GDM enabled. systemd lists running units in /run/systemd/units.
+  if [[ -d /host/systemd-units ]]; then
+    local dm; dm=$(ls /host/systemd-units 2>/dev/null \
+      | sed -n 's/^invocation:\(gdm3\?\|lightdm\|sddm\|display-manager\)\.service$/\1/p' | head -1)
+    [[ -z $dm ]] && row "desktop session" "none" ok \
+      || row "desktop session" "$dm is running (sudo systemctl set-default multi-user.target && sudo systemctl isolate multi-user.target)" WARN
+  fi
+  grep -q '^search \.$' /etc/resolv.conf 2>/dev/null && row "resolv.conf" "'search .' frozen in; bare hostnames fail (restart the container)" WARN
+  echo "preflight ($warns warning$([[ $warns == 1 ]] || echo s)):"
+  printf '%s\n' "${rows[@]}" | awk -F'|' '$3 == "WARN" {printf "  %-5s %-26s %s\n", $3, $1, $2}'
+  printf '%s\n' "${rows[@]}" | awk -F'|' '$3 != "WARN" {printf "  %-5s %-26s %s\n", $3, $1, $2}'
+}
+[[ "${PREFLIGHT:-1}" == 1 ]] && preflight || true
+
 # --- worker memory ---------------------------------------------------------
 # Torch's caching allocator never hands a freed block back to the OS, and on
 # unified memory that block is host memory. The sparse indexer scores
@@ -217,6 +328,22 @@ export TORCH_MEM_FRACTION="${TORCH_MEM_FRACTION:-0.92}"
 
 RAY_ADDRESS="${RAY_ADDRESS:-${HEAD_HOST:?set HEAD_HOST to the head node address}:6379}"
 export RAY_ADDRESS
+
+# One head per group. A worker left at ROLE=head (the value .env.example ships)
+# starts a second driver: mentat refuses it ("group ... already has an active
+# driver session"), the container restarts forever, and the real head waits
+# for GPUs that never join. Catch the mismatch here and say which setting.
+case "$ROLE" in head|worker) ;; *) echo "FATAL: ROLE=$ROLE; set it to head or worker in .env" >&2; exit 1;; esac
+_head_ip="$(getent ahostsv4 "$HEAD_HOST" 2>/dev/null | awk 'NR==1 {print $1}')"
+_head_ip="${_head_ip:-$HEAD_HOST}"
+if [[ "$ROLE" == "head" && "$VLLM_HOST_IP" != "$_head_ip" ]]; then
+  echo "FATAL: ROLE=head, but VLLM_HOST_IP=$VLLM_HOST_IP is not HEAD_HOST=$HEAD_HOST ($_head_ip). Set ROLE=worker in .env on every node except the head." >&2
+  exit 1
+fi
+if [[ "$ROLE" == "worker" && "$VLLM_HOST_IP" == "$_head_ip" ]]; then
+  echo "FATAL: ROLE=worker, but VLLM_HOST_IP=$VLLM_HOST_IP is HEAD_HOST. Set ROLE=head in .env on this node." >&2
+  exit 1
+fi
 
 # mentat (the Ray replacement in this image) rendezvouses subclusters by
 # group; every rank of this deployment must carry the same value. Running the
@@ -451,6 +578,14 @@ if [[ "$ROLE" == "worker" ]]; then
 else
   export MENTAT_OPENAI_API="${MENTAT_OPENAI_API:-${API_PORT:-8002}/v1}"
   export MENTAT_MODEL_PROVIDER="${MENTAT_MODEL_PROVIDER:-vllm}"
+fi
+
+# --- fabric check: every rank meets on the head before vLLM ------------------
+# Times an NCCL all-reduce and compares versions, override files and knobs
+# across nodes (fabric-check.py). Warnings only; FABRIC_CHECK=0 skips it.
+if [[ "${FABRIC_CHECK:-1}" == "1" ]]; then
+  stage fabric-check
+  python3 /usr/local/bin/fabric-check.py || echo "fabric check: failed to run; continuing"
 fi
 
 # --- worker: join and block -------------------------------------------------

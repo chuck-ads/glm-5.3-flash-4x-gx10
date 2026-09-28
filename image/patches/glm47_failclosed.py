@@ -51,7 +51,13 @@ import re
 
 # Moved from vllm.entrypoints.openai.engine.protocol on vLLM main; the old
 # path is why this plugin failed to register on the 2026-09-22 nightly.
-from vllm.entrypoints.generate.base.protocol import DeltaFunctionCall, DeltaToolCall
+from vllm.entrypoints.generate.base.protocol import (
+    DeltaFunctionCall,
+    DeltaToolCall,
+    ExtractedToolCallInformation,
+    FunctionCall,
+    ToolCall,
+)
 from vllm.logger import init_logger
 from vllm.parser.engine.adapters import make_adapters
 from vllm.parser.glm47_moe import Glm47MoeParser
@@ -86,6 +92,47 @@ class Glm47FailClosedParser(Glm47MoeParser):
         # An argument delta cannot be withdrawn once sent, and the decision needs
         # the whole argument object.
         self._stream_arg_deltas = False
+        # Sentinel arguments of refused calls by call id. A non-streaming result
+        # is rebuilt from each slot's raw arguments, so it needs these too.
+        self._refused: dict[str, str] = {}
+
+    def _reset(self, *args, **kwargs) -> None:
+        super()._reset(*args, **kwargs)
+        self._refused = {}
+
+    def _args_json(self, idx: int) -> str:
+        """The slot's arguments as the client would receive them.
+
+        GLM writes arguments as <arg_key>/<arg_value> pairs and the slot keeps
+        that raw text; the engine's converter turns it into JSON. Text the
+        converter cannot handle is returned raw, and fails as "not JSON".
+        """
+        slot = self._tool_slots[idx]
+        converter = self._arg_converter
+        if converter is None:
+            return slot.args
+        try:
+            text = converter(slot.args, False)
+        except (json.JSONDecodeError, ValueError, TypeError):
+            return slot.args
+        return self._fix_arg_types(text, slot.name) if text and slot.name else text
+
+    def _build_extracted_result(self, *deltas):
+        result = super()._build_extracted_result(*deltas)
+        calls = list(result.tool_calls or [])
+        for call in calls:
+            if call.id in self._refused:
+                call.function.arguments = self._refused[call.id]
+        # Upstream drops a call whose name no tool matches; re-offer it like the
+        # streaming path does, so the turn is not left empty.
+        seen = {call.id for call in calls}
+        for slot in self._tool_slots:
+            if slot.id in self._refused and slot.id not in seen:
+                calls.append(ToolCall(id=slot.id, function=FunctionCall(name=slot.name,
+                                                                         arguments=self._refused[slot.id])))
+        if len(calls) != len(result.tool_calls or []):
+            result = ExtractedToolCallInformation(tools_called=True, tool_calls=calls, content=result.content)
+        return result
 
     def _offered_names(self) -> list[str]:
         names: list[str] = []
@@ -155,8 +202,8 @@ class Glm47FailClosedParser(Glm47MoeParser):
         slot = self._tool_slots[idx]
         emitted = (slot.name or self._try_extract_name(idx) or "").strip()
         resolved = self._resolve_name(emitted)
-        # `args` is a property, so reading it leaves the converter's state alone.
-        reason = self._reject_reason(resolved or emitted, slot.args)
+        # Converting here leaves the slot and the converter's state alone.
+        reason = self._reject_reason(resolved or emitted, self._args_json(idx))
         if reason is None:
             if resolved and resolved != emitted:
                 slot.name = resolved
@@ -184,6 +231,7 @@ class Glm47FailClosedParser(Glm47MoeParser):
         self._ensure_tool_id(slot, name)
         arguments = json.dumps({SENTINEL_KEY: reason}, ensure_ascii=False)
         slot.streamed_json = arguments
+        self._refused[slot.id] = arguments
         deltas.append(
             DeltaToolCall(
                 index=idx,

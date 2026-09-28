@@ -30,6 +30,10 @@ here.
 - **Four ASUS GX10 or other GB10 boxes** (sm_121a, 128 GB unified memory).
   The model takes all of each box: ~91.9 GiB of GPU allocations per rank, with
   1.5-3 GiB left free (2026-09-23). Nothing else runs beside it.
+- **Each box running headless** (`multi-user.target`). These boxes ship with a
+  GNOME desktop enabled, and a desktop session takes memory and GPU time from
+  the model: `sudo systemctl set-default multi-user.target && sudo systemctl
+  isolate multi-user.target`. The preflight warns while one is running.
 - **A ConnectX-7 fabric between all four**, through one switch (ours is a
   MikroTik CRS812 at 200G), with RoCE working. Each box needs a static IPv4
   on its ConnectX interface, all in one subnet (`CLUSTER_SUBNET`), MTU 9000.
@@ -279,6 +283,26 @@ status page says whether torch or something else holds a box's memory.
 > network; put it behind something, or narrow `SEARCH_ROOTS`, on any network
 > you do not control.
 
+Two checks run at every start and print to the container log; neither stops
+the boot:
+
+- `preflight`, on every node, lists what makes the stack slow or fragile:
+  a fabric port down or below 200 Gb/s, a port MTU below 9000, a PCIe link
+  below its maximum, one ConnectX root instead of two, link flaps, RDMA
+  retransmit counters, GPU clock-limit events, other GPU processes, too little
+  host memory for the TP size and KV pin, page cache the GPU cannot use yet
+  (it evicts the model files' cached pages itself), swap in use, a model directory on
+  NFS, no disk for the first weight snapshot, an unpatched chat template, and
+  a memlock limit, and a running desktop session. `PREFLIGHT=0` skips it.
+- `fabric check`, on the head, after every rank has joined (before vLLM
+  starts): an NCCL all-reduce over the fabric with its bus bandwidth against
+  the ~95 Gb/s per ConnectX root a healthy link gives, and every version,
+  override file and knob that must match across nodes, with the ones that do
+  not. A fabric can link up at full rate and still move 12 Gb/s until the
+  boxes' power is drained; this is where that shows. `FABRIC_CHECK=0` skips
+  it; a node that cannot meet the others within `FABRIC_CHECK_TIMEOUT_S`
+  (120) skips it too.
+
 Host-level facts (GPU, PCI, RDMA counters, dmesg, systemd) come from
 spark-agent's separate per-machine agent, which is not part of this recipe.
 The container tools above cover the engine; diagnosing the fabric or the box
@@ -377,6 +401,17 @@ and with speculation off (2026-09-06). The nvidia build this recipe uses and
 the compressed-tensors builds (RedHatAI NVFP4, INT4 AWQ) are clean on the same
 stack. Independently reported by tonyd2wild.
 
+**Workers restart forever with `group 'glm53' already has an active driver session`,
+and the head waits for GPUs.** More than one node is running as the head: every
+head starts a driver, mentat allows one per group, and the others exit and
+restart while the real head never sees its workers. Set `ROLE=worker` in
+`compose/.env` on every node except the head (`.env.example` ships `ROLE=head`),
+keep `HEAD_HOST` the head's address everywhere, then take all four down and start
+them again. An image built from this tree refuses a head whose `VLLM_HOST_IP` is not
+`HEAD_HOST`, with a FATAL line naming the fix. If the error remains with the roles
+right, an earlier head's session is still held: with all four down, run
+`mentat stop --group glm53` against the head's daemon (or restart its mentatd).
+
 **Boot hangs at `waiting for 4 GPUs, have 1`.** Every box must set `HEAD_HOST`
 to the head, not to itself. mentat replicates an agent's *registration*
 across the mesh but not its *liveness*: point a box at its own daemon and the
@@ -427,4 +462,16 @@ The right entry is the RoCE v2 one for the box's static fabric address.
 `image/patches/LICENSE.MiaAI-Lab`) ·
 [tonyliu312](https://github.com/tonyliu312) (28 GiB KV pin) ·
 [nacyot](https://artifacts.nacyot.com/vllm-spin-wait-gb10-en/) (spin wait) ·
-[alexellis](https://github.com/alexellis/glm-5.3-flash-4x-dgx-spark-switchless)
+[alexellis](https://github.com/alexellis/glm-5.3-flash-4x-dgx-spark-switchless),
+and [RigMark](https://github.com/alexellis/rigmark) for the gate ·
+[incoai](https://huggingface.co/incoai/GLM-5.3-Flash-DFlash2) (the DFlash2 drafter) ·
+[NNNtrance](https://github.com/NNNtrance/GLM-5.3-Flash-EXL3-DGX-Spark) (the fail-closed
+tool parser idea) ·
+[Chuck](https://github.com/chuck-ads) (the RDMA path MTU, [#6](https://github.com/mmastrac/glm-5.3-flash-4x-gx10/pull/6), and the
+streamed tool call and page cache reports, [#7](https://github.com/mmastrac/glm-5.3-flash-4x-gx10/issues/7)) ·
+[ayayalar](https://github.com/ayayalar) (the first-boot stall report behind the
+fabric check, [#5](https://github.com/mmastrac/glm-5.3-flash-4x-gx10/issues/5))
+
+The files in `experimental/` that replace vLLM and FlashInfer files keep their
+Apache-2.0 headers, and [experimental/README.md](experimental/README.md#sources)
+lists which ones they are.

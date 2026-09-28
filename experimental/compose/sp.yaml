@@ -1,0 +1,27 @@
+# Sequence parallelism over TP for prefill (fixes/model.py): a forward with at
+# least VLLM_GLM_SP_MIN_TOKENS tokens runs mHC, norms and residuals on a quarter
+# of the tokens per rank, with a gather before and a reduce-scatter after
+# attention and the MLP. Decode batches stay plain TP: at that size the extra
+# collectives cost more than the replicated work they save.
+# VLLM_GLM_SP_FP8_GATHER: KDA attention inputs are gathered as per-token FP8
+# (in_proj's FP8 GEMM quantizes the same rows the same way).
+# VLLM_GLM_ARX_PREFETCH: decode all-reduces prefetch the next weights into L2
+# while they wait (needs arx.yaml).
+# VLLM_GLM_SP_MOE_FUSED: MoE layers under SP compute shared + scaled routed
+# sum in one kernel that feeds arxbig's RDMA reduce-scatter row by row (needs
+# arx.yaml with VLLM_ARXBIG_RS=1 and megamoe.yaml with VLLM_MOE_PREFILL=1).
+# VLLM_GLM_SP_MOE_QUANT_GATHER: those layers route each rank's own rows and
+# gather the input already quantized (NVFP4 for the routed experts, FP8 for the
+# shared expert) instead of as bf16, matching it to within 1e-4 relative.
+services:
+  glm53:
+    volumes:
+      - ../experimental/fixes/model.py:/usr/local/lib/python3.12/dist-packages/vllm/models/glm5next/common/model.py:ro
+    environment:
+      - VLLM_GLM_SP_TP=${VLLM_GLM_SP_TP:-1}
+      - VLLM_GLM_SP_MIN_TOKENS=${VLLM_GLM_SP_MIN_TOKENS:-1024}
+      - VLLM_GLM_SP_FP8_GATHER=${VLLM_GLM_SP_FP8_GATHER:-1}
+      - VLLM_GLM_ARX_PREFETCH=${VLLM_GLM_ARX_PREFETCH:-1}
+      - VLLM_GLM_SP_MOE_FUSED=${VLLM_GLM_SP_MOE_FUSED:-1}
+      - VLLM_GLM_SP_MOE_QUANT_GATHER=${VLLM_GLM_SP_MOE_QUANT_GATHER:-1}
+      - VLLM_GLM_SP_MOE_CHECK=${VLLM_GLM_SP_MOE_CHECK:-0}

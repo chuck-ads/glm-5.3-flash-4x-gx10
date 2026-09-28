@@ -1,0 +1,14 @@
+# Adaptive speculation length: the scheduler picks how many of the 7 DFlash2
+# drafts each step verifies (adaptive_k.py). The per-batch-size schedule only
+# makes vLLM capture CUDA graphs for every level; the scheduler ignores it.
+services:
+  glm53:
+    volumes:
+      - ../experimental/adaptive-k/adaptive_k.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/core/sched/adaptive_k.py:ro
+    environment:
+      - EXTRA_ARGS=--scheduler-cls vllm.v1.core.sched.adaptive_k.AdaptiveKScheduler --speculative-config {"method":"dflash","model":"/models/glm-5.3-flash-dflash2","num_speculative_tokens":7,"attention_backend":"TRITON_ATTN","num_speculative_tokens_per_batch_size":[[1,1,7],[2,2,5],[3,3,4],[4,4,3],[5,5,2],[6,32,7]]}
+      - VLLM_ADAPTIVE_K_CONTROL=/root/.cache/adaptive-k
+      - VLLM_ADAPTIVE_K_PER_REQUEST=${VLLM_ADAPTIVE_K_PER_REQUEST:-0}
+      - VLLM_ADAPTIVE_K_ONLINE=${VLLM_ADAPTIVE_K_ONLINE:-1}
+      - VLLM_ADAPTIVE_K_MODEL=${VLLM_ADAPTIVE_K_MODEL:-27.0,0.635,0.542}
+      - VLLM_ADAPTIVE_K_COST_MS=${VLLM_ADAPTIVE_K_COST_MS:-2:29.7,3:33.1,4:36.5,5:39.8,6:43.1,7:46.0,8:48.9}

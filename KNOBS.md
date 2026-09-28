@@ -19,6 +19,10 @@ Meaning and rationale stay in the entrypoint and compose comments.
 | `DECODE_RESERVE_TOKENS` | _(empty)_ |
 | `DFLASH_MODEL` | `/models/glm-5.3-flash-dflash2` |
 | `EXTRA_ARGS` | _(empty)_ |
+| `FABRIC_CHECK` | `1` |
+| `FABRIC_CHECK_GBPS_PER_DEVICE` | `95` |
+| `FABRIC_CHECK_PORT` | `29511` |
+| `FABRIC_CHECK_TIMEOUT_S` | `120` |
 | `FABRIC_SUBNETS` | `$CLUSTER_SUBNET` _(derived)_ |
 | `FABRIC_WAIT_S` | `0` |
 | `GLOO_SOCKET_IFNAME` | _(empty)_ |
@@ -44,6 +48,7 @@ Meaning and rationale stay in the entrypoint and compose comments.
 | `NCCL_IB_HCA` | _(empty)_ |
 | `NCCL_MAX_NCHANNELS` | `8` |
 | `NCCL_SOCKET_IFNAME` | `$GLOO_SOCKET_IFNAME` _(derived)_ |
+| `PREFLIGHT` | `1` |
 | `PYTORCH_CUDA_ALLOC_CONF` | `expandable_segments:True` |
 | `RAY_ADDRESS` | `${HEAD_HOST:?set HEAD_HOST to the head node address}:6379` _(derived)_ |
 | `RAY_MEMORY_MONITOR_REFRESH_MS` | `0` |
