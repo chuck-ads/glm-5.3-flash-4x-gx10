@@ -377,6 +377,17 @@ and with speculation off (2026-09-06). The nvidia build this recipe uses and
 the compressed-tensors builds (RedHatAI NVFP4, INT4 AWQ) are clean on the same
 stack. Independently reported by tonyd2wild.
 
+**Workers restart forever with `group 'glm53' already has an active driver session`,
+and the head waits for GPUs.** More than one node is running as the head: every
+head starts a driver, mentat allows one per group, and the others exit and
+restart while the real head never sees its workers. Set `ROLE=worker` in
+`compose/.env` on every node except the head (`.env.example` ships `ROLE=head`),
+keep `HEAD_HOST` the head's address everywhere, then take all four down and start
+them again. An image built from this tree refuses a head whose `VLLM_HOST_IP` is not
+`HEAD_HOST`, with a FATAL line naming the fix. If the error remains with the roles
+right, an earlier head's session is still held: with all four down, run
+`mentat stop --group glm53` against the head's daemon (or restart its mentatd).
+
 **Boot hangs at `waiting for 4 GPUs, have 1`.** Every box must set `HEAD_HOST`
 to the head, not to itself. mentat replicates an agent's *registration*
 across the mesh but not its *liveness*: point a box at its own daemon and the

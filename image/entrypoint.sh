@@ -218,6 +218,22 @@ export TORCH_MEM_FRACTION="${TORCH_MEM_FRACTION:-0.92}"
 RAY_ADDRESS="${RAY_ADDRESS:-${HEAD_HOST:?set HEAD_HOST to the head node address}:6379}"
 export RAY_ADDRESS
 
+# One head per group. A worker left at ROLE=head (the value .env.example ships)
+# starts a second driver: mentat refuses it ("group ... already has an active
+# driver session"), the container restarts forever, and the real head waits
+# for GPUs that never join. Catch the mismatch here and say which setting.
+case "$ROLE" in head|worker) ;; *) echo "FATAL: ROLE=$ROLE; set it to head or worker in .env" >&2; exit 1;; esac
+_head_ip="$(getent ahostsv4 "$HEAD_HOST" 2>/dev/null | awk 'NR==1 {print $1}')"
+_head_ip="${_head_ip:-$HEAD_HOST}"
+if [[ "$ROLE" == "head" && "$VLLM_HOST_IP" != "$_head_ip" ]]; then
+  echo "FATAL: ROLE=head, but VLLM_HOST_IP=$VLLM_HOST_IP is not HEAD_HOST=$HEAD_HOST ($_head_ip). Set ROLE=worker in .env on every node except the head." >&2
+  exit 1
+fi
+if [[ "$ROLE" == "worker" && "$VLLM_HOST_IP" == "$_head_ip" ]]; then
+  echo "FATAL: ROLE=worker, but VLLM_HOST_IP=$VLLM_HOST_IP is HEAD_HOST. Set ROLE=head in .env on this node." >&2
+  exit 1
+fi
+
 # mentat (the Ray replacement in this image) rendezvouses subclusters by
 # group; every rank of this deployment must carry the same value. Running the
 # same model twice means two compose stacks with DISTINCT MENTAT_GROUP values.
