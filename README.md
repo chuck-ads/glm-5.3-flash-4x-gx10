@@ -111,8 +111,8 @@ image build fails without it.
 
 ## 2. Build the image
 
-    image/build.sh                       # -> spark-glm53:v8
-    TAG=spark-glm53:v9 image/build.sh
+    image/build.sh                       # tags the build.sh default
+    TAG=spark-glm53:mine image/build.sh  # or your own tag
     BASE=... image/build.sh              # override the pinned nightly
 
 The build context is the repo root (`docker build -f image/Dockerfile .`), so

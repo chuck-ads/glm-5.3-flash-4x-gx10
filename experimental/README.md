@@ -1,12 +1,12 @@
 # Experimental speedups
 
 Compose overrides that stack on `compose/glm53.yaml`. Each one mounts files
-over the v8 image (vLLM nightly ddd6fbca); several replace whole vLLM or
+over the image this repo builds (vLLM nightly ddd6fbca); several replace whole vLLM or
 FlashInfer files, so they only match that image.
 
 ## How to use it
 
-Requirements: the v8 image built from this tree (`image/build.sh`) and the normal four-node setup from the main README (the same `compose/glm53.yaml` and a per-node `compose/.env` on every box). The overrides replace files inside that image, so they do not apply to other images.
+Requirements: the image built from this tree (`image/build.sh`) and the normal four-node setup from the main README (the same `compose/glm53.yaml` and a per-node `compose/.env` on every box). The overrides replace files inside that image, so they do not apply to other images.
 
 1. In each node's `compose/.env`, set `FABRIC_SUBNETS` to both ConnectX subnets, one per PCIe root (see `.env.example`). The entrypoint derives `NCCL_IB_HCA` and `NCCL_IB_GID_INDEX` from it, and arx and arxbig use the same two devices; each rank's log shows them (`arx all-reduce: rank r/4 on [dev0, dev1]`). With only one device they log a warning and fall back to NCCL.
 2. Start the stack with every override, on every node (head first, as usual). Order matters: later files win.
@@ -66,10 +66,10 @@ Single stream, thinking off, 512 tokens (`dev/repro/decode.py` prompts):
 
 | | structured | code | prose |
 |---|---|---|---|
-| v8, DFlash2 k=7 | 121.9 | 91.3 | 38.7 |
+| stock, DFlash2 k=7 | 121.9 | 91.3 | 38.7 |
 | all overrides | 170.3 | 120.8 | 65.8 |
 
-Concurrent streams, aggregate tok/s at 1/2/4/8 streams: v8 85.5/65.4/99.5/147.8,
+Concurrent streams, aggregate tok/s at 1/2/4/8 streams: stock 85.5/65.4/99.5/147.8,
 all overrides 126/102/146/198 (16 streams: 271). With a different prompt per
 stream, code runs 317 tok/s at 16 streams and 451 at 32, and 50 mixed streams
 run 404. RigMark (reasoning=low) code / prose / structured 107.9 / 61.7 / 157.1
@@ -81,7 +81,7 @@ Cold prefill, tok/s (random-word prompts, nothing cached):
 
 | | 32k | 128k |
 |---|---|---|
-| v8 | 2,730 | 2,679 |
+| stock | 2,730 | 2,679 |
 | all overrides | 4,946 | 4,750 |
 
 Boot goes from about 8 minutes to about 3.5 once snapshots exist.
@@ -225,9 +225,9 @@ Other people's work in here:
 
 `quality/quality.py` (GSM8K first 250 and HumanEval, greedy, thinking off;
 HumanEval programs run by `quality/run_he.py` in a no-network container),
-against stock v8 on the same boxes:
+against stock on the same boxes:
 
-| | v8 | all overrides |
+| | stock | all overrides |
 |---|---|---|
 | GSM8K (250) | 97.2% | 97.2% |
 | HumanEval pass@1 | 156/164 | 156/164 |
