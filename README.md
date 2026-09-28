@@ -1,5 +1,7 @@
 # GLM-5.3-Flash on 4× ASUS GX10 (GB10), TP=4
 
+Need help? Join us on discord: https://discord.gg/M7XTrRJW3
+
 GLM-5.3-Flash (NVFP4) served by vLLM at TP=4 across four GB10 boxes over
 RoCE, with DFlash2 speculative decoding and a 524k context window. The base
 is an unmodified vLLM nightly plus a handful of small patches and a newer FlashKDA.
