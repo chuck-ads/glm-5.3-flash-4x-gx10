@@ -94,7 +94,7 @@ that holds cluster membership.
 | `attic/` | used by nothing: the pre-nightly host patches and overrides |
 
 mentatd and mentatd-serve come from the [mentat](https://github.com/mmastrac/mentat)
-repo, with their own compose files (step 5).
+repo, with their own compose files (step 4).
 
 ## 1. Get the repo onto every box
 
@@ -156,48 +156,7 @@ which is used only when `VLLM_GLM53_CUDA_SPARSE_MLA` is set. This recipe does
 not set it and serves on the MiaAI path (see Patches), so an empty directory
 is fine.
 
-## 4. Patch the checkpoint's chat template
-
-Thinking off needs a fix in the chat template, and the template the image
-uses is not always its own. `image/chat-template.jinja` carries the fix and
-is baked into the image, but the entrypoint prefers the checkpoint's own
-`chat_template.jinja` whenever that one handles images (it contains
-`<|begin_of_image|>`), and the nvidia checkpoint's does. So edit the
-checkpoint's template on every box, keeping the original beside it:
-
-    cd "$MODEL_HOST_DIR"
-    cp chat_template.jinja chat_template.jinja.orig
-
-Then make the same two changes `image/chat-template.jinja` makes:
-
-1. The line that sets `effective_reasoning_effort` maps thinking off to low
-   effort:
-
-   ```jinja
-   {%- set thinking_off = (thinking is defined and not thinking) or (enable_thinking is defined and not enable_thinking) -%}
-   {%- set effective_reasoning_effort = reasoning_effort if reasoning_effort is defined and reasoning_effort in ['low', 'high'] else ('low' if thinking_off else 'max') -%}
-   ```
-
-2. The generation prompt at the end always opens `<think>`, never an empty
-   `<think></think>`:
-
-   ```jinja
-   {%- if add_generation_prompt -%}
-       <|assistant|>{{- '<think>' -}}
-   {%- endif -%}
-   ```
-
-Check that the template still renders before you boot (it uses
-`{% break %}`, so load it with
-`jinja2.Environment(extensions=["jinja2.ext.loopcontrols"])`). The edit is
-lost whenever the checkpoint is downloaded again. The smoketest's two thinking
-cases catch a missing edit; checking only that `reasoning` is empty does not,
-because it is empty in the broken state too, with the trace in `content`.
-
-Why this matters: see "Long output repeats or skips when thinking is off"
-under Troubleshooting.
-
-## 5. Start mentatd, and mentatd-serve on the head
+## 4. Start mentatd, and mentatd-serve on the head
 
 mentat has its own repo, compose files and `.env`. On every box, in a
 checkout of [mmastrac/mentat](https://github.com/mmastrac/mentat) at `v0.12.0`:
@@ -217,7 +176,7 @@ mentat's `mentatd.yaml` explains the optional settings: interface ranking and
 fabric tags (`MENTAT_ANNOUNCE_IFACES`), and signing announcements
 (`MENTAT_SECRET`, which must then be set on every box).
 
-## 6. Start the model
+## 5. Start the model
 
 On every box:
 
@@ -246,7 +205,7 @@ name (an older checkout run from a different directory, say) must be taken
 down with its own compose file first, or the two collide on the container
 name.
 
-## 7. Check it
+## 6. Check it
 
     smoketest/run.sh http://<head>:6381
 
@@ -360,7 +319,7 @@ during `docker build`).
 | `glm53_dflash2_kv_groups.py` | The GLM-5-Next KV grouper gives up on the drafter's sliding-window layers and the model dies unifying page sizes. Keeps the target's groups and adds the drafter's. | ours |
 | `vllm-58720-routed-experts.patch` | Indexes the expert mapping once per load instead of scanning it for every checkpoint tensor. Merged after this nightly. | [vllm#58720](https://github.com/vllm-project/vllm/pull/58720) |
 | `image/flashkda/` | Rebuilds `vllm/_flashkda_C` from FlashKDA 17a037d. The nightly's b59532f rounds the KDA recurrent state to bf16 every 16 tokens, and long prefills then corrupt tool-call output; 17a037d keeps it in fp32. | [vllm#58846](https://github.com/vllm-project/vllm/pull/58846), open |
-| `glm53_reasoning_always_parsed.py` | Thinking off maps to low reasoning effort (see step 4), so the model always emits a short `<think>` block. vLLM's `glm47_moe` stops parsing `<think>` when thinking is off, and the trace would land in `content`. | ours |
+| `glm53_reasoning_always_parsed.py` | Thinking off maps to low reasoning effort (`image/chat-template.jinja`), so the model always emits a short `<think>` block. vLLM's `glm47_moe` stops parsing `<think>` when thinking is off, and the trace would land in `content`. | ours |
 | `glm47_failclosed.py` | Tool-call parser plugin (`--tool-call-parser glm47_failclosed`). Checks each call against the tools the request offered; a call with a bad name or argument keys comes back as a retryable call whose sentinel argument names the mistake, instead of being dropped or leaking into history. Containment, not a cure. | ours, after [NNNtrance](https://github.com/NNNtrance/GLM-5.3-Flash-EXL3-DGX-Spark) #7 and #11 |
 | `spin_wait.py` | vLLM's shm queue spins for `busy_loop_s` (1 s) after each message; on GB10 the CPU and GPU share one power budget, so the spin costs ~20 °C and decode. 0.002 keeps the fast path; 0 (always block) measured slower. | [nacyot](https://artifacts.nacyot.com/vllm-spin-wait-gb10-en/) |
 | `worker_memory_cap.py` | Caps each worker's share of unified memory (`TORCH_MEM_FRACTION`, 0.92). vLLM never calls `set_per_process_memory_fraction`, so nothing else bounds a worker. | ours |
@@ -397,11 +356,12 @@ official template always opens `<think>` under `Reasoning Effort: Max`, and an
 empty `<think></think>` is out of distribution. Every checkpoint (nvidia,
 RedHatAI, the official FP8), both MoE kernels, TP=2 and TP=4, and Hugging
 Face's own `glm5_next` implementation fail the same way (2026-09-23). The
-template fix in step 4 maps `thinking: false` / `enable_thinking: false` to
-`Reasoning Effort: Low` instead: a few dozen tokens of reasoning and a clean
-answer. `reasoning_effort` (`low`, `high`, default `max`) also works directly,
-at the top level of the request. If long output still breaks with thinking
-off, the checkpoint's template has lost the edit.
+image's template (`image/chat-template.jinja`) maps `thinking: false` /
+`enable_thinking: false` to `Reasoning Effort: Low` instead: a few dozen tokens
+of reasoning and a clean answer. `reasoning_effort` (`low`, `high`, default
+`max`) also works directly, at the top level of the request. If long output
+still breaks with thinking off, check that `CHAT_TEMPLATE` isn't pointing at the
+checkpoint's own template.
 
 **Intermittent corrupted tokens.** The LibertAIDAI modelopt NVFP4 build emits
 them mid-word, inside rare tokens: invisible in English, reproducible with a

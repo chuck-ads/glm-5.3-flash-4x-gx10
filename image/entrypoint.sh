@@ -293,10 +293,6 @@ PY
     elif (( ${free:-0} >= 182 / tp + 5 )); then row "weight snapshot" "none yet for TP=$tp, ${free} GiB free" ok
     else row "weight snapshot" "none yet for TP=$tp, ${free:-?} GiB free, needs ~$(( 182 / tp )) GiB" WARN; fi
   fi
-  tmpl="${MODEL_DIR:-/models/glm-5.3-flash-nvfp4}/chat_template.jinja"
-  if grep -qF '<|begin_of_image|>' "$tmpl" 2>/dev/null && ! grep -q 'set thinking_off' "$tmpl"; then
-    row "chat template" "checkpoint's own, unpatched (README section 4)" WARN
-  fi
   # A desktop session holds GPU memory and CPU on the shared memory, and these
   # boxes ship with GDM enabled. systemd lists running units in /run/systemd/units.
   if [[ -d /host/systemd-units ]]; then
@@ -772,28 +768,13 @@ MM=(--limit-mm-per-prompt "$LIMIT_MM")
 # while images were capped at 4.
 [[ "${SKIP_MM_PROFILING:-0}" == "1" ]] && MM+=(--skip-mm-profiling)
 
-# The checkpoint ships a TEXT-ONLY template. Its media branch renders
-# "<reminder>You are unable to process this image ...</reminder>" and emits no
-# placeholder, so vLLM's processor extracts the image features, scans the
-# prompt for <|begin_of_image|><|image|><|end_of_image|> to replace, finds
-# nothing, and every image request dies in _apply_prompt_updates with
-# "Failed to apply prompt replacement for mm_items['image'][0]". The weights
-# are fine: 347 vision tensors and all three token ids are in the checkpoint.
-#
-# chat-template.jinja beside this file is that same template with the media
-# branch emitting what vLLM scans for. A checkpoint that grows its own image
-# handling takes precedence again, so this stops applying by itself.
+# The image's template is nvidia's, with one change: thinking off asks for low
+# reasoning effort. GLM-5.3-Flash has no non-thinking mode, and the empty
+# <think></think> that thinking off otherwise produces makes long output repeat
+# and skip (README, Troubleshooting). The checkpoint's own template is ignored,
+# so a fresh download cannot bring the problem back. CHAT_TEMPLATE overrides.
 TMPL=()
-: "${CHAT_TEMPLATE:=}"
-if [[ -z "$CHAT_TEMPLATE" ]]; then
-  if grep -qF '<|begin_of_image|>' "$MODEL/chat_template.jinja" 2>/dev/null; then
-    CHAT_TEMPLATE="$MODEL/chat_template.jinja"
-  elif [[ -f /usr/local/share/glm53-chat-template.jinja ]]; then
-    CHAT_TEMPLATE=/usr/local/share/glm53-chat-template.jinja
-  elif [[ -f "$MODEL/chat_template.jinja" ]]; then
-    CHAT_TEMPLATE="$MODEL/chat_template.jinja"
-  fi
-fi
+: "${CHAT_TEMPLATE:=/usr/local/share/glm53-chat-template.jinja}"
 if [[ -n "$CHAT_TEMPLATE" ]]; then
   TMPL=(--chat-template "$CHAT_TEMPLATE")
   echo "chat template: $CHAT_TEMPLATE"

@@ -12,6 +12,7 @@ Meaning and rationale stay in the entrypoint and compose comments.
 | `BLOCK_SIZE` | `2304` |
 | `CACHE_ROOT` | `/root/.cache` |
 | `CACHE_TAG` | `${SHARED_TAG}-${_opthash}` _(derived)_ |
+| `CHAT_TEMPLATE` | `/usr/local/share/glm53-chat-template.jinja` |
 | `CLUSTER_SUBNET` | _(none)_ |
 | `CUDAGRAPH_CAPTURE_SIZES` | `8 16 32 64 96 128 192 256` |
 | `CUDAGRAPH_MODE` | `FULL_AND_PIECEWISE` |
