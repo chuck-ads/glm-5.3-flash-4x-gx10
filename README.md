@@ -91,7 +91,6 @@ that holds cluster membership.
 | `smoketest/` | `run.sh <base> [served-name]` |
 | `.submodules/spark-agent` | the status server, reached through the `vllm` symlink |
 | `dev/` | not in the image: the corruption diagnosis and repros, kernel and patch tests, the step tap |
-| `attic/` | used by nothing: the pre-nightly host patches and overrides |
 
 mentatd and mentatd-serve come from the [mentat](https://github.com/mmastrac/mentat)
 repo, with their own compose files (step 4).

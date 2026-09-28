@@ -5,7 +5,6 @@
 .git
 .submodules/*/.git
 .submodules/spark-agent/agent
-attic/
 dev/
 smoketest/
 compose/

@@ -7,7 +7,7 @@ builds of this recipe at the time.
 ## Moving to a vLLM nightly, 2026-09-23
 
 Before the nightly, this ran a per-model base image with 16 vLLM source files
-bind-mounted from five compose overrides (now in `attic/`). Every one of those
+bind-mounted from five compose overrides (in git history, up to 6524882). Every one of those
 files is now upstream, a flag, or a small anchored patch baked into the image,
 and nothing is mounted over it. Images v4 to v7 used `nightly-0961bbae`; v8
 moved to `nightly-ddd6fbca` on 2026-09-26 and has not been measured.
