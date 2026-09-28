@@ -811,7 +811,15 @@ if [[ "$MOE_BACKEND" == "marlin" ]]; then
   fi
 else
   MOE=(--moe-backend "${MOE_BACKEND}")
-  echo "MoE backend: ${MOE_BACKEND} (vLLM's own CUDA graph sizes)"
+  # vLLM captures graphs up to max_num_seqs x (1 + drafts) x 2, capped at
+  # 512 tokens. The top half only serves steps that mix decodes with a short
+  # new prompt, so stop at the largest decode step: 32 tokens at TP=2 instead
+  # of 64, for example. Those mixed steps run without a graph.
+  _q=1; [[ -n "$SPEC_METHOD" && "$SPEC_METHOD" != none ]] && _q=$(( SPEC_TOKENS + 1 ))
+  _cgmax=$(( MAX_NUM_SEQS * _q < 512 ? MAX_NUM_SEQS * _q : 512 ))
+  CUDAGRAPH_MAX="${CUDAGRAPH_MAX:-$_cgmax}"
+  MOE+=(--max-cudagraph-capture-size "$CUDAGRAPH_MAX")
+  echo "MoE backend: ${MOE_BACKEND}, CUDA graphs up to ${CUDAGRAPH_MAX} tokens"
 fi
 
 # Multimodal: up to 16 images a prompt, no video. Exceeding a cap is a clean

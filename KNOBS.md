@@ -16,6 +16,7 @@ Meaning and rationale stay in the entrypoint and compose comments.
 | `CLUSTER_SUBNET` | `${FABRIC_SUBNETS%% *}` _(derived)_ |
 | `CONTAINER_NAME` | `glm53` |
 | `CUDAGRAPH_CAPTURE_SIZES` | `8 16 32 64 96 128 192 256` |
+| `CUDAGRAPH_MAX` | `MAX_NUM_SEQS` x (1 + `SPEC_TOKENS`), at most 512 _(derived)_ |
 | `CUDAGRAPH_MODE` | `FULL_AND_PIECEWISE` |
 | `CUDA_GRAPHS` | `1` |
 | `DECODE_RESERVE_TOKENS` | _(empty)_ |
