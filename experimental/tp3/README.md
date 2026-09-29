@@ -90,7 +90,7 @@ Two sets of three boxes (one 200G switch, both ConnectX ports), each booted
 clean with the defaults above (RecoverSSM on, `MAX_NUM_SEQS` 64), on this
 branch over main 6db84d4 plus the capture-size fix from its own PR
 (`tp-cudagraph-tiers`: an explicit capture cap dropped adaptive-k's decode
-sizes 3, 5, 6, 10, 12 and 15). KV holds 1.48M tokens.
+sizes 3, 5, 6, 10, 12 and 15). KV held 1.48M tokens then; with #16 the head log reports 1,905,585. On main 2288993 plus #20 and the zeroer fix, set 1 re-measured within noise: RigMark 43.9 / 76.2 / 113.7, cold prefill 8k / 32k / 64k 3312 / 3637 / 3587.
 
 | | set 1 | set 2 |
 |---|---|---|
