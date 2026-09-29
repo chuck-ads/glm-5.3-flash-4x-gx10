@@ -5,7 +5,8 @@ TP=3 leaves 22 MLA heads per rank (66 padded / 3). The kernel used to take
 tl.arange(0, H), which needs a power of two; it now tiles at the next power of
 two (>= 16) with a head mask. This checks both launch paths (one program per
 token, and the split + combine path decode takes) against a float32 torch
-reference, at H = 16 and 32 (unchanged tiles) and 22 and 24 (masked).
+reference, at H = 16 and 32 (unchanged tiles) and 22 and 24 (masked), and
+H = 11 (TP=6: 66 / 6, a 16-row tile with 5 rows masked).
 
 Pass: every case within 5e-3 relative error of the reference, and the masked
 cases no worse than twice the H=16 error. On one GB10:
@@ -58,7 +59,7 @@ def case(H, T, splits, g):
 g = torch.Generator(device=dev).manual_seed(0)
 errs, fails = {}, 0
 for T, splits in ((64, 1), (4, 8)):
-    for H in (16, 22, 24, 32):
+    for H in (11, 16, 22, 24, 32):
         e = case(H, T, splits, g)
         errs[(H, T)] = e
         print(f"H={H:2d} T={T:2d} splits={splits}: rel err {e:.2e}", flush=True)

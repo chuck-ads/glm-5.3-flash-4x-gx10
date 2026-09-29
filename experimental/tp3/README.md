@@ -105,3 +105,52 @@ At 48 streams, `MAX_NUM_SEQS` 64 gave +24% over 32 (269 tok/s); single-stream
 decode is the same at both. A 30-minute soak of the same TP=3 changes on main
 14cc721 (`MAX_NUM_SEQS` 32, 16 mixed streams back to back, 824 requests) had
 no errors or restarts.
+
+## TP=6 (six boxes)
+
+The same padded checkpoint splits by 6: 11 MLA heads, 11 KDA heads and 384
+MoE columns per rank. The pieces above cover it: the KDA in_proj has N=4491
+per rank and takes the same row padding to 16, and the sparse-MLA kernel runs
+11 heads in a 16-row tile. Only the drafter needs a different pad: its 8 kv
+heads need 12 (48 q heads) to split by 6.
+
+1. **Padded model dirs, on every box**, as step 1 above but with the drafter
+   padded for 6:
+
+       ... /tp3/make_padded.py SRC_MODEL DST_MODEL SRC_DRAFT DST_DRAFT \
+         --draft-heads 48 --draft-kv-heads 12 --tp 6
+
+2. **compose/.env on every box**: `MODEL_HOST_DIR` / `DFLASH_HOST_DIR` at the
+   padded dirs, as for TP=3.
+
+3. **Start** with the TP=3 command, `tp6.yaml` in place of `tp3.yaml`. It sets
+   `TP=6` and its own snapshot tag (`tp6pad-...`).
+
+The entrypoint's `TP=6` case sets the TP=4 KV pin (26 GiB; weights are ~1/6
+per rank), block size 1792, `MAX_NUM_SEQS` 64 with RecoverSSM and the
+adaptive-k starting cost. With 11 KDA heads per rank the mamba page is ~1573
+tokens of attention page: the default 2304 pads it 46%, 1792 (the smallest
+multiple of 256 above it) 14%, for a 1.7% bigger pool (4.47M tokens) and a
+faster cached TTFT (0.677 against 0.903 s).
+
+Tried and not kept at TP=6 (screened on an earlier build): sequence parallel off (-25% prefill),
+`max_num_batched_tokens` 32768 (no prefill gain, and it needs a bigger arxbig
+slot), `VLLM_MEGAMOE_MAX_TOKENS=16` (within noise).
+
+`dev/patch-tests/_glm53_tp3_sparse_mla_test.py` includes H=11.
+
+Measured on six boxes (one 200G switch, both ConnectX ports, GPU clocks locked
+at 1989 MHz), booted clean with the entrypoint defaults on this branch's TP=6
+changes over main 3df22b8 plus the padded-config import guard (#24):
+
+| | |
+|---|---|
+| RigMark prose / code / structured, tok/s | 66.5 / 120.3 / 176.4 |
+| RigMark cold prefill 8k / 32k / 64k, tok/s | 4776 / 4902 / 4903 |
+| `gate/prefill.py` cold 32k / 128k, tok/s (2 seeds) | 4900, 4914 / 4737, 4724 |
+| `gate/conc_workload.py code` 1 / 2 / 4 / 8 streams, tok/s | 145.0 / 153.8 / 218.6 / 281.7 |
+| `conc_workload.py mixed` 8 / 16 / 32 / 48 / 64 streams, tok/s | 196.6 / 298.7 / 415.3 / 506.7 / 596.5 |
+| `dev/repro/needle.py` 32k to 480k | 12/12 |
+
+A 30-minute soak at 64 mixed streams (2700 requests) had no errors,
+preemptions or restarts.

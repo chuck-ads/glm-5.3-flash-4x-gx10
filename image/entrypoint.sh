@@ -65,13 +65,24 @@ case "$TP" in
      # What the online fit converged to at TP=3 with RecoverSSM on (3% mean
      # error; the two three-box sets agreed within 2%).
      : "${VLLM_ADAPTIVE_K_MODEL:=27.5,0.795,0.50}" ;;
+  6) # Six boxes on the same zero-padded checkpoint as TP=3 (66 / 66 / 2304
+     # split as 11 heads and 384 MoE columns per rank). Weights are ~1/6 per
+     # rank, so the TP=4 KV pin fits. With 11 KDA heads a rank's mamba page is
+     # ~1573 tokens of attention page: block 2304 pads it 46%, 1792 (the
+     # smallest multiple of 256 above it) 14%, for a 1.7% bigger pool and
+     # 17% faster cached TTFT.
+     : "${KV_CACHE_MEMORY:=27917287424}" "${MAX_MODEL_LEN:=524288}" "${BLOCK_SIZE:=1792}"
+     export BLOCK_SIZE
+     (( _rs )) && : "${MAX_NUM_SEQS:=64}"
+     # What the online fit converged to at TP=6 with RecoverSSM on (1% error).
+     : "${VLLM_ADAPTIVE_K_MODEL:=19.3,0.50,0.40}" ;;
   2) : "${KV_CACHE_MEMORY:=8589934592}" "${MAX_MODEL_LEN:=163840}" "${MAX_NUM_BATCHED_TOKENS:=8192}"
      # A rank reads twice the expert weights it does at TP=4, so the
      # per-expert cost is held at twice TP=4's and the rest fitted.
      (( _rs )) && : "${MAX_NUM_SEQS:=16}" "${VLLM_ADAPTIVE_K_MODEL:=32.1,1.32,0.427}"
      : "${MAX_NUM_SEQS:=4}"
      : "${VLLM_ADAPTIVE_K_MODEL:=35.0,1.27,0.8}" ;;
-  *) echo "FATAL: TP=$TP; this recipe is tuned for TP=4 or TP=RING4 (four boxes), TP=3 (three) or TP=2 (two)" >&2; exit 1 ;;
+  *) echo "FATAL: TP=$TP; this recipe is tuned for TP=4 or TP=RING4 (four boxes), TP=6 (six), TP=3 (three) or TP=2 (two)" >&2; exit 1 ;;
 esac
 export VLLM_ADAPTIVE_K_MODEL
 # SPEC_METHOD picks the drafter: dflash (the separate DFlash2 draft model at

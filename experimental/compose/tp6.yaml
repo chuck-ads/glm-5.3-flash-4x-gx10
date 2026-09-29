@@ -1,0 +1,14 @@
+# TP=6: six boxes on the TP=3 zero-padded checkpoint (experimental/tp3):
+# 66 MLA / 66 KDA heads and 2304 MoE columns split as 11 / 11 / 384 per rank.
+# The DFlash2 drafter's 8 kv heads need 12 (48 q) at TP=6:
+#   make_padded.py ... --draft-heads 48 --draft-kv-heads 12 --tp 6
+# Stack LAST, as tp3.yaml.
+services:
+  glm53:
+    volumes:
+      - ../experimental/tp3/tp3pad.py:/usr/local/lib/python3.12/dist-packages/vllm/models/glm5next/common/tp3pad.py:ro
+      - ../experimental/tp3/vocab_parallel_embedding.py:/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/vocab_parallel_embedding.py:ro
+    environment:
+      - TP=6
+      - EXTRA_ARGS=--scheduler-cls vllm.v1.core.sched.adaptive_k.AdaptiveKScheduler --speculative-config {"method":"dflash","model":"/models/glm-5.3-flash-dflash2","num_speculative_tokens":7,"attention_backend":"TRITON_ATTN","num_speculative_tokens_per_batch_size":[[1,1,7],[2,2,5],[3,3,4],[4,4,3],[5,5,2],[6,32,7]]} --mm-encoder-tp-mode data
+      - VLLM_WEIGHT_SNAPSHOT_TAG=tp6pad-2026-09-29

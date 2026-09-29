@@ -23,6 +23,7 @@ p.add_argument("--kda-heads", type=int, default=66)
 p.add_argument("--moe-i", type=int, default=2304)
 p.add_argument("--draft-heads", type=int, default=36)
 p.add_argument("--draft-kv-heads", type=int, default=9)
+p.add_argument("--tp", type=int, default=3)
 a = p.parse_args()
 
 # ---- target ---------------------------------------------------------------
@@ -57,7 +58,7 @@ os.makedirs(a.dst_draft, exist_ok=True)
 dc = json.load(open(os.path.join(a.src_draft, "config.json")))
 H0, KV0, hd = dc["num_attention_heads"], dc["num_key_value_heads"], dc["head_dim"]
 H1, KV1 = a.draft_heads, a.draft_kv_heads
-assert H0 // KV0 == H1 // KV1 and H1 % 3 == 0 and KV1 % 3 == 0
+assert H0 // KV0 == H1 // KV1 and H1 % a.tp == 0 and KV1 % a.tp == 0
 sd = load_file(os.path.join(a.src_draft, "model.safetensors"))
 
 
