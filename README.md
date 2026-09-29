@@ -1,19 +1,29 @@
-# GLM-5.3-Flash on ASUS GX10 (GB10): TP=4 on four boxes, TP=2 on two
+# GLM-5.3-Flash on ASUS GX10 (GB10): TP=2 or 4
 
 Need help? Join us on discord: https://discord.gg/M7XTrRJW3
 
-GLM-5.3-Flash (NVFP4) served by vLLM across four GB10 boxes at TP=4, or two at
-TP=2, over RoCE, with DFlash2 speculative decoding. The base
-is an unmodified vLLM nightly plus a handful of small patches and a newer FlashKDA.
-Ray is replaced by [mentat](https://github.com/mmastrac/mentat).
+nvidia/GLM-5.3-Flash-NVFP4 served by vLLM on four GB10 boxes at TP=4, or two
+at TP=2, over RoCE. The base is an unmodified vLLM nightly with a few small
+patches, a newer FlashKDA, and [mentat](https://github.com/mmastrac/mentat) in
+place of Ray. What makes it fast:
 
-Measured 2026-09-27 and 28, temperature 0,
-nvidia/GLM-5.3-Flash-NVFP4, both ConnectX-7 PCIe roots in use, with every
-override in `experimental/compose/`: RDMA collectives, weight snapshots, FP8
-and NVFP4 dense layers, custom MoE and attention kernels, sequence parallel
-prefill, a draft-length scheduler and RecoverSSM. They replace files inside
-the image this repo builds, and each one can be turned off.
-[experimental/README.md](experimental/README.md) has the details.
+- DFlash2 speculative decoding, with a scheduler that picks the draft length
+  each step from a live model of step cost and acceptance.
+- RecoverSSM: drafts are verified from one saved KDA state per request, so
+  more requests fit in the KV pool.
+- NVFP4 MoE kernels for GB10: a decode kernel that keeps activations in 16
+  bits, and a fused prefill kernel.
+- A Triton sparse MLA kernel in place of FlashInfer's.
+- FP8 and NVFP4 copies of the dense layers the checkpoint leaves in bf16. This
+  is the only change with a measured accuracy cost: about 1% NLL on prose.
+- RDMA collectives over both ConnectX-7 PCIe roots in place of NCCL's.
+- Sequence-parallel prefill, gathering activations already quantized.
+- The drafter's KV in its own small pool, and a pinned KV cache.
+- Processed-weight snapshots, so a restart takes about 3 minutes.
+
+Each of these lives in `experimental/`, replaces files inside the image this
+repo builds, and can be turned off. [experimental/README.md](experimental/README.md)
+has the details.
 
 | | TP=4, four boxes | TP=2, two boxes |
 |---|---|---|
@@ -24,13 +34,13 @@ the image this repo builds, and each one can be turned off.
 | KV pool (fp8_e4m3) | 4.40M tokens, 26 GiB pin | 1.10M tokens, 8 GiB pin |
 | longest request | 524k tokens | 160k tokens |
 | requests decoding at once | 64 | 16 |
-| boot, once snapshots exist | ~2 min | not measured yet |
+| boot, once snapshots exist | ~3 min | ~3 min |
 | needle recall | 12/12 up to 507k tokens | 6/6 up to 128k tokens |
 
 Prefill is first-touch on random words, so nothing is cached. Decode is
-[RigMark](https://github.com/alexellis/rigmark)'s single-stream decode,
-reasoning effort low, with every output gate passing. Streams each generate
-512 tokens from a different code prompt (`gate/conc_workload.py`).
+[RigMark](https://github.com/alexellis/rigmark)'s single-stream decode at
+temperature 0, reasoning effort low, with every output gate passing. Streams
+each generate 512 tokens from a different code prompt (`gate/conc_workload.py`).
 
 TP=4 is the default. For two boxes, put `TP=2` in `compose/.env` on both.
 Each box then holds twice the weights, so the entrypoint picks a smaller KV
