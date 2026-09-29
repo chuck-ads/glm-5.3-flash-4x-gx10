@@ -963,10 +963,13 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
                 layer.mlp.down_proj.reduce_results = not sp
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # TP=3: zero-pad heads / MoE intermediate to the served config's sizes.
-        from .tp3pad import pad_weights
+        # TP=3: zero-pad heads / MoE intermediate to the served config's
+        # sizes. Only padded configs need tp3pad.py, which only tp3.yaml mounts,
+        # so unpadded TP=2/4 must not import it.
+        if getattr(self.config, "tp_pad_orig", None):
+            from .tp3pad import pad_weights
 
-        weights = pad_weights(weights, self.config)
+            weights = pad_weights(weights, self.config)
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             (".gate_up_proj", ".gate_proj", 0),
