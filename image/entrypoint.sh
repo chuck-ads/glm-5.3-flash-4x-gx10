@@ -818,11 +818,21 @@ else
   # 512 tokens. The top half only serves steps that mix decodes with a short
   # new prompt, so stop at the largest decode step: 32 tokens at TP=2 instead
   # of 64, for example. Those mixed steps run without a graph.
-  _q=1; [[ -n "$SPEC_METHOD" && "$SPEC_METHOD" != none ]] && _q=$(( SPEC_TOKENS + 1 ))
-  _cgmax=$(( MAX_NUM_SEQS * _q < 512 ? MAX_NUM_SEQS * _q : 512 ))
-  CUDAGRAPH_MAX="${CUDAGRAPH_MAX:-$_cgmax}"
-  MOE+=(--max-cudagraph-capture-size "$CUDAGRAPH_MAX")
-  echo "MoE backend: ${MOE_BACKEND}, CUDA graphs up to ${CUDAGRAPH_MAX} tokens"
+  # A draft width that varies with batch size (adaptive-k.yaml's
+  # num_speculative_tokens_per_batch_size) decodes 1 + k tokens per request
+  # for each k in the schedule: 3, 5, 6, 10, 12, 15. vLLM adds those sizes to
+  # its capture list only when it picks the ceiling itself, so an explicit cap
+  # leaves them to run without a full graph. Leave the ceiling to vLLM there,
+  # unless CUDAGRAPH_MAX sets one.
+  if [[ -z "${CUDAGRAPH_MAX:-}" && "${EXTRA_ARGS:-}" == *num_speculative_tokens_per_batch_size* ]]; then
+    echo "MoE backend: ${MOE_BACKEND}, vLLM's own CUDA graph sizes (draft width varies with batch size)"
+  else
+    _q=1; [[ -n "$SPEC_METHOD" && "$SPEC_METHOD" != none ]] && _q=$(( SPEC_TOKENS + 1 ))
+    _cgmax=$(( MAX_NUM_SEQS * _q < 512 ? MAX_NUM_SEQS * _q : 512 ))
+    CUDAGRAPH_MAX="${CUDAGRAPH_MAX:-$_cgmax}"
+    MOE+=(--max-cudagraph-capture-size "$CUDAGRAPH_MAX")
+    echo "MoE backend: ${MOE_BACKEND}, CUDA graphs up to ${CUDAGRAPH_MAX} tokens"
+  fi
 fi
 
 # Multimodal: up to 16 images a prompt, no video. Exceeding a cap is a clean
