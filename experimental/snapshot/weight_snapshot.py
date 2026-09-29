@@ -76,6 +76,10 @@ class Snapshot:
         key["tag"] = os.environ.get("VLLM_WEIGHT_SNAPSHOT_TAG", "")
         # The indexer's top-k scratch buffer has one row per batched token.
         key["max_num_batched_tokens"] = vllm_config.scheduler_config.max_num_batched_tokens
+        # The MoE backend decides the processed expert layout (marlin repacks
+        # and drops the input scales flashinfer_cutlass keeps), so a snapshot
+        # from one backend cannot load under another.
+        key["moe_backend"] = str(getattr(vllm_config.kernel_config, "moe_backend", ""))
         digest = hashlib.sha256(json.dumps(key, sort_keys=True).encode()).hexdigest()[:16]
         role = "draft" if is_draft else "target"
         name = f"{role}-tp{key['tp_rank']}of{key['tp_size']}-dp{key['dp_rank']}-{digest}"
