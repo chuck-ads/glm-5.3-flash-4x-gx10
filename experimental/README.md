@@ -243,4 +243,4 @@ against stock on the same boxes:
 | HumanEval pass@1 | 156/164 | 156/164 |
 | count to 200, thinking off, 5 runs | 0 corrupt | 0 corrupt |
 | tool call at 42k context, 40 greedy runs | 10 diverge | 0 diverge |
-| NLL vs bf16, 4 texts | within ±0.006 | within ±0.006 |
+| NLL vs bf16 dense layers | within ±0.006 | prose +0.008 to +0.025, code within ±0.007 |
