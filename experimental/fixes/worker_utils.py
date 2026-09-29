@@ -26,7 +26,11 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     MultipleOf,
 )
-from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
+from vllm.v1.core.kv_cache_utils import (
+    DraftSlidingWindowSpec,
+    KVCacheBlockCopy,
+    _glm5_next_draft_pool_enabled,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     EncoderOnlyAttentionSpec,
@@ -171,8 +175,11 @@ class KVBlockZeroer:
                 dp = kv.data_ptr()
 
                 # GLM53-DRAFT-POOL: the drafter's layers live on their own
-                # smaller pool, whose new blocks are never sent for zeroing.
-                if kv.shape[0] < num_blocks:
+                # pool, whose new blocks are never sent for zeroing. Tell them
+                # by their spec, not by size: at TP=3 the 256-token draft
+                # pages outnumber the 3584-token target blocks (705 to 567).
+                if (isinstance(spec, DraftSlidingWindowSpec)
+                        and _glm5_next_draft_pool_enabled()):
                     continue
                 assert kv.shape[0] % num_blocks == 0, (
                     f"{layer_name}: {kv.shape[0]} kernel blocks is not a "
