@@ -46,9 +46,9 @@ ARG VLLM_REF=ddd6fbca148a867aad1fcab7ec72f582b9977db4
 # Pulled registry-qualified: a bare `mentat-artifacts:<ver>` tag resolves to a
 # local image, and those have been mislabelled before -- every image "pinned"
 # to 0.4.0 once silently ran 0.1.0. Verify with `mentatd --version`.
-# Must match the fleet's host daemons: 0.14.0 speaks protocol 0.99, and a shim
+# Must match the fleet's host daemons: 0.17.0 speaks protocol 0.99, and a shim
 # from 0.8 or older cannot join them.
-ARG MENTAT_VERSION=0.14.0
+ARG MENTAT_VERSION=0.17.0
 
 FROM mmastrac/mentat-artifacts:${MENTAT_VERSION} AS mentat
 
@@ -196,6 +196,9 @@ RUN python3 /tmp/verify-base.py && rm /tmp/verify-base.py
 COPY image/chat-template.jinja /usr/local/share/glm53-chat-template.jinja
 COPY vllm/status-server.py image/self-test.py image/fabric-check.py /usr/local/bin/
 COPY image/entrypoint.sh image/discover.sh /
+# Per-rank NCCL and arx devices on a ring (TP=RING4), set before vLLM loads NCCL.
+COPY image/fabric_ring.py /usr/local/lib/python3.12/dist-packages/
+RUN echo "import fabric_ring" > /usr/local/lib/python3.12/dist-packages/fabric_ring.pth
 RUN chmod +x /usr/local/bin/status-server.py /usr/local/bin/self-test.py /usr/local/bin/fabric-check.py /entrypoint.sh
 
 # 8002 = OpenAI API, 8082 = startup status page, bound from container start
