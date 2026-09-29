@@ -84,7 +84,26 @@ class Fp8DenseLinearMethod(LinearMethodBase):
         raise NotImplementedError("layers are converted after loading")
 
     def apply(self, layer, x, bias=None):
-        return _fp8_linear(x, layer.weight, layer.weight_scale, bias)
+        return _trim(layer, _fp8_linear(x, layer.weight, layer.weight_scale, bias))
+
+
+def _trim(layer, y: torch.Tensor) -> torch.Tensor:
+    """Drop the zero rows _pad_rows16 added (TP=3 KDA in_proj: N=8726)."""
+    n = getattr(layer, "n_trim", None)
+    return y if n is None else y[..., :n]
+
+
+def _pad_rows16(module: torch.nn.Module) -> None:
+    """Zero-extend the output rows to a multiple of 16 so the layer can
+    convert (megadense4 and the tiled layout need N % 16 == 0). Outputs are
+    trimmed back in apply."""
+    w = module.weight.data
+    N = w.shape[0]
+    pad = -N % 16
+    if pad == 0:
+        return
+    module.weight = Parameter(torch.cat([w, w.new_zeros(pad, w.shape[1])]), requires_grad=False)
+    module.n_trim = N
 
 
 class Fp8LMHeadMethod:
@@ -126,15 +145,15 @@ class W4DenseLinearMethod(LinearMethodBase):
         x2 = x.reshape(-1, shape[-1])
         N, K = layer.w4_shape
         if x2.shape[0] == 0:
-            return x.new_empty(*shape[:-1], N)
+            return _trim(layer, x.new_empty(*shape[:-1], N))
         M = x2.shape[0]
         if M > 32 or x2.dtype != torch.bfloat16:  # past 32 tokens the FP8 copy is faster
-            return _fp8_linear(x, layer.weight_fp8, layer.weight_fp8_scale, bias)
+            return _trim(layer, _fp8_linear(x, layer.weight_fp8, layer.weight_fp8_scale, bias))
         y = torch.empty(M, N, dtype=torch.bfloat16, device=x.device)
         _w4_ext.gemm(x2.contiguous(), layer.weight, layer.weight_scale, layer.weight_scale_2, y, 0)
         if bias is not None:
             y += bias
-        return y.reshape(*shape[:-1], N)
+        return _trim(layer, y.reshape(*shape[:-1], N))
 
 
 class W4LMHeadMethod(W4DenseLinearMethod):
@@ -205,9 +224,15 @@ def convert(model: torch.nn.Module) -> None:
         w = getattr(m, "weight", None)
         if not isinstance(w, torch.Tensor) or w.dtype != torch.bfloat16 or w.dim() != 2:
             continue
-        if w.shape[0] % 16 or w.shape[1] % 16 or _EXCLUDE.search(name):
+        if w.shape[1] % 16 or _EXCLUDE.search(name):
             continue
         method = getattr(m, "quant_method", None)
+        if w.shape[0] % 16:
+            if not (isinstance(m, LinearBase) and isinstance(method, UnquantizedLinearMethod)
+                    and getattr(m, "bias", None) is None):
+                continue
+            _pad_rows16(m)
+            w = m.weight
         if (w4 is not None and w4.search(name) and isinstance(m, LinearBase)
                 and isinstance(method, UnquantizedLinearMethod) and w.shape[1] % 128 == 0):
             _w4()
